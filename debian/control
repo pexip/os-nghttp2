@@ -1,6 +1,7 @@
 Source: nghttp2
-Maintainer: Dave Beckett <dajobe@debian.org>
-Uploaders: Tomasz Buchert <tomasz@debian.org>
+Maintainer: Pexip AS <packaging@pexip.com>
+XSBC-Pexip-Original-Maintainer: Dave Beckett <dajobe@debian.org>
+XSBC-Pexip-Original-Uploaders: Tomasz Buchert <tomasz@debian.org>
 Section: httpd
 Priority: optional
 Build-Depends: debhelper (>= 10),
@@ -21,6 +22,7 @@ Standards-Version: 3.9.8
 Homepage: https://nghttp2.org/
 Vcs-Git: git://anonscm.debian.org/collab-maint/nghttp2.git
 Vcs-Browser: https://anonscm.debian.org/cgit/collab-maint/nghttp2.git
+XS-Pexip-Upstream: http://ftp.debian.org/debian/ stretch
 
 Package: libnghttp2-dev
 Suggests: libnghttp2-doc
