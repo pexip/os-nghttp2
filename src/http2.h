@@ -41,6 +41,7 @@
 #include "memchunk.h"
 #include "template.h"
 #include "allocator.h"
+#include "base64.h"
 
 namespace nghttp2 {
 
@@ -187,24 +188,63 @@ nghttp2_nv make_nv_ls_nocopy(const char (&name)[N], const StringRef &value) {
           NGHTTP2_NV_FLAG_NO_COPY_NAME | NGHTTP2_NV_FLAG_NO_COPY_VALUE};
 }
 
+enum HeaderBuildOp {
+  HDOP_NONE,
+  // Forwarded header fields must be stripped.  If this flag is not
+  // set, all Forwarded header fields other than last one are added.
+  HDOP_STRIP_FORWARDED = 1,
+  // X-Forwarded-For header fields must be stripped.  If this flag is
+  // not set, all X-Forwarded-For header fields other than last one
+  // are added.
+  HDOP_STRIP_X_FORWARDED_FOR = 1 << 1,
+  // X-Forwarded-Proto header fields must be stripped.  If this flag
+  // is not set, all X-Forwarded-Proto header fields other than last
+  // one are added.
+  HDOP_STRIP_X_FORWARDED_PROTO = 1 << 2,
+  // Via header fields must be stripped.  If this flag is not set, all
+  // Via header fields other than last one are added.
+  HDOP_STRIP_VIA = 1 << 3,
+  // Early-Data header fields must be stripped.  If this flag is not
+  // set, all Early-Data header fields are added.
+  HDOP_STRIP_EARLY_DATA = 1 << 4,
+  // Strip above all header fields.
+  HDOP_STRIP_ALL = HDOP_STRIP_FORWARDED | HDOP_STRIP_X_FORWARDED_FOR |
+                   HDOP_STRIP_X_FORWARDED_PROTO | HDOP_STRIP_VIA |
+                   HDOP_STRIP_EARLY_DATA,
+  // Sec-WebSocket-Accept header field must be stripped.  If this flag
+  // is not set, all Sec-WebSocket-Accept header fields are added.
+  HDOP_STRIP_SEC_WEBSOCKET_ACCEPT = 1 << 5,
+  // Sec-WebSocket-Key header field must be stripped.  If this flag is
+  // not set, all Sec-WebSocket-Key header fields are added.
+  HDOP_STRIP_SEC_WEBSOCKET_KEY = 1 << 6,
+  // Transfer-Encoding header field must be stripped.  If this flag is
+  // not set, all Transfer-Encoding header fields are added.
+  HDOP_STRIP_TRANSFER_ENCODING = 1 << 7,
+};
+
 // Appends headers in |headers| to |nv|.  |headers| must be indexed
 // before this call (its element's token field is assigned).  Certain
 // headers, including disallowed headers in HTTP/2 spec and headers
-// which require special handling (i.e. via), are not copied.
+// which require special handling (i.e. via), are not copied.  |flags|
+// is one or more of HeaderBuildOp flags.  They tell function that
+// certain header fields should not be added.
 void copy_headers_to_nva(std::vector<nghttp2_nv> &nva,
-                         const HeaderRefs &headers);
+                         const HeaderRefs &headers, uint32_t flags);
 
 // Just like copy_headers_to_nva(), but this adds
 // NGHTTP2_NV_FLAG_NO_COPY_NAME and NGHTTP2_NV_FLAG_NO_COPY_VALUE.
 void copy_headers_to_nva_nocopy(std::vector<nghttp2_nv> &nva,
-                                const HeaderRefs &headers);
+                                const HeaderRefs &headers, uint32_t flags);
 
 // Appends HTTP/1.1 style header lines to |buf| from headers in
 // |headers|.  |headers| must be indexed before this call (its
 // element's token field is assigned).  Certain headers, which
 // requires special handling (i.e. via and cookie), are not appended.
+// |flags| is one or more of HeaderBuildOp flags.  They tell function
+// that certain header fields should not be added.
 void build_http1_headers_from_headers(DefaultMemchunks *buf,
-                                      const HeaderRefs &headers);
+                                      const HeaderRefs &headers,
+                                      uint32_t flags);
 
 // Return positive window_size_increment if WINDOW_UPDATE should be
 // sent for the stream |stream_id|. If |stream_id| == 0, this function
@@ -242,7 +282,7 @@ void erase_header(HeaderRef *hd);
 //
 // This function returns the new rewritten URI on success. If the
 // location URI is not subject to the rewrite, this function returns
-// emtpy string.
+// empty string.
 StringRef rewrite_location_uri(BlockAllocator &balloc, const StringRef &uri,
                                const http_parser_url &u,
                                const StringRef &match_host,
@@ -267,6 +307,7 @@ enum {
   HD__HOST,
   HD__METHOD,
   HD__PATH,
+  HD__PROTOCOL,
   HD__SCHEME,
   HD__STATUS,
   HD_ACCEPT_ENCODING,
@@ -278,6 +319,7 @@ enum {
   HD_CONTENT_TYPE,
   HD_COOKIE,
   HD_DATE,
+  HD_EARLY_DATA,
   HD_EXPECT,
   HD_FORWARDED,
   HD_HOST,
@@ -287,6 +329,8 @@ enum {
   HD_LINK,
   HD_LOCATION,
   HD_PROXY_CONNECTION,
+  HD_SEC_WEBSOCKET_ACCEPT,
+  HD_SEC_WEBSOCKET_KEY,
   HD_SERVER,
   HD_TE,
   HD_TRAILER,
@@ -389,6 +433,16 @@ StringRef copy_lower(BlockAllocator &balloc, const StringRef &src);
 
 // Returns true if te header field value |s| contains "trailers".
 bool contains_trailers(const StringRef &s);
+
+// Creates Sec-WebSocket-Accept value for |key|.  The capacity of
+// buffer pointed by |dest| must have at least 24 bytes (base64
+// encoded length of 16 bytes data).  It returns empty string in case
+// of error.
+StringRef make_websocket_accept_token(uint8_t *dest, const StringRef &key);
+
+// Returns true if HTTP version represents pre-HTTP/1.1 (e.g.,
+// HTTP/0.9 or HTTP/1.0).
+bool legacy_http1(int major, int minor);
 
 } // namespace http2
 

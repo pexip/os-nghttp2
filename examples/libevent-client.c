@@ -23,33 +23,33 @@
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #ifdef __sgi
-#include <string.h>
-#define errx(exitcode, format, args...)                                        \
-  {                                                                            \
-    warnx(format, ##args);                                                     \
-    exit(exitcode);                                                            \
-  }
-#define warnx(format, args...) fprintf(stderr, format "\n", ##args)
+#  include <string.h>
+#  define errx(exitcode, format, args...)                                      \
+    {                                                                          \
+      warnx(format, ##args);                                                   \
+      exit(exitcode);                                                          \
+    }
+#  define warnx(format, args...) fprintf(stderr, format "\n", ##args)
 char *strndup(const char *s, size_t size);
 #endif
 
 #ifdef HAVE_CONFIG_H
-#include <config.h>
+#  include <config.h>
 #endif /* HAVE_CONFIG_H */
 
 #include <sys/types.h>
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif /* HAVE_UNISTD_H */
 #ifdef HAVE_SYS_SOCKET_H
-#include <sys/socket.h>
+#  include <sys/socket.h>
 #endif /* HAVE_SYS_SOCKET_H */
 #ifdef HAVE_NETINET_IN_H
-#include <netinet/in.h>
+#  include <netinet/in.h>
 #endif /* HAVE_NETINET_IN_H */
 #include <netinet/tcp.h>
 #ifndef __sgi
-#include <err.h>
+#  include <err.h>
 #endif
 #include <signal.h>
 #include <string.h>
@@ -199,22 +199,27 @@ static void print_headers(FILE *f, nghttp2_nv *nva, size_t nvlen) {
 /* nghttp2_send_callback. Here we transmit the |data|, |length| bytes,
    to the network. Because we are using libevent bufferevent, we just
    write those bytes into bufferevent buffer. */
-static ssize_t send_callback(nghttp2_session *session _U_, const uint8_t *data,
-                             size_t length, int flags _U_, void *user_data) {
+static ssize_t send_callback(nghttp2_session *session, const uint8_t *data,
+                             size_t length, int flags, void *user_data) {
   http2_session_data *session_data = (http2_session_data *)user_data;
   struct bufferevent *bev = session_data->bev;
+  (void)session;
+  (void)flags;
+
   bufferevent_write(bev, data, length);
   return (ssize_t)length;
 }
 
 /* nghttp2_on_header_callback: Called when nghttp2 library emits
    single header name/value pair. */
-static int on_header_callback(nghttp2_session *session _U_,
+static int on_header_callback(nghttp2_session *session,
                               const nghttp2_frame *frame, const uint8_t *name,
                               size_t namelen, const uint8_t *value,
-                              size_t valuelen, uint8_t flags _U_,
-                              void *user_data) {
+                              size_t valuelen, uint8_t flags, void *user_data) {
   http2_session_data *session_data = (http2_session_data *)user_data;
+  (void)session;
+  (void)flags;
+
   switch (frame->hd.type) {
   case NGHTTP2_HEADERS:
     if (frame->headers.cat == NGHTTP2_HCAT_RESPONSE &&
@@ -229,10 +234,12 @@ static int on_header_callback(nghttp2_session *session _U_,
 
 /* nghttp2_on_begin_headers_callback: Called when nghttp2 library gets
    started to receive header block. */
-static int on_begin_headers_callback(nghttp2_session *session _U_,
+static int on_begin_headers_callback(nghttp2_session *session,
                                      const nghttp2_frame *frame,
                                      void *user_data) {
   http2_session_data *session_data = (http2_session_data *)user_data;
+  (void)session;
+
   switch (frame->hd.type) {
   case NGHTTP2_HEADERS:
     if (frame->headers.cat == NGHTTP2_HCAT_RESPONSE &&
@@ -247,9 +254,11 @@ static int on_begin_headers_callback(nghttp2_session *session _U_,
 
 /* nghttp2_on_frame_recv_callback: Called when nghttp2 library
    received a complete frame from the remote peer. */
-static int on_frame_recv_callback(nghttp2_session *session _U_,
+static int on_frame_recv_callback(nghttp2_session *session,
                                   const nghttp2_frame *frame, void *user_data) {
   http2_session_data *session_data = (http2_session_data *)user_data;
+  (void)session;
+
   switch (frame->hd.type) {
   case NGHTTP2_HEADERS:
     if (frame->headers.cat == NGHTTP2_HCAT_RESPONSE &&
@@ -266,11 +275,13 @@ static int on_frame_recv_callback(nghttp2_session *session _U_,
    is meant to the stream we initiated, print the received data in
    stdout, so that the user can redirect its output to the file
    easily. */
-static int on_data_chunk_recv_callback(nghttp2_session *session _U_,
-                                       uint8_t flags _U_, int32_t stream_id,
-                                       const uint8_t *data, size_t len,
-                                       void *user_data) {
+static int on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
+                                       int32_t stream_id, const uint8_t *data,
+                                       size_t len, void *user_data) {
   http2_session_data *session_data = (http2_session_data *)user_data;
+  (void)session;
+  (void)flags;
+
   if (session_data->stream_data->stream_id == stream_id) {
     fwrite(data, 1, len, stdout);
   }
@@ -287,7 +298,7 @@ static int on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
   int rv;
 
   if (session_data->stream_data->stream_id == stream_id) {
-    fprintf(stderr, "Stream %d closed with error_code=%d\n", stream_id,
+    fprintf(stderr, "Stream %d closed with error_code=%u\n", stream_id,
             error_code);
     rv = nghttp2_session_terminate_session(session, NGHTTP2_NO_ERROR);
     if (rv != 0) {
@@ -297,17 +308,22 @@ static int on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
   return 0;
 }
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
 /* NPN TLS extension client callback. We check that server advertised
    the HTTP/2 protocol the nghttp2 library supports. If not, exit
    the program. */
-static int select_next_proto_cb(SSL *ssl _U_, unsigned char **out,
+static int select_next_proto_cb(SSL *ssl, unsigned char **out,
                                 unsigned char *outlen, const unsigned char *in,
-                                unsigned int inlen, void *arg _U_) {
+                                unsigned int inlen, void *arg) {
+  (void)ssl;
+  (void)arg;
+
   if (nghttp2_select_next_protocol(out, outlen, in, inlen) <= 0) {
     errx(1, "Server did not advertise " NGHTTP2_PROTO_VERSION_ID);
   }
   return SSL_TLSEXT_ERR_OK;
 }
+#endif /* !OPENSSL_NO_NEXTPROTONEG */
 
 /* Create SSL_CTX. */
 static SSL_CTX *create_ssl_ctx(void) {
@@ -321,11 +337,13 @@ static SSL_CTX *create_ssl_ctx(void) {
                       SSL_OP_ALL | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 |
                           SSL_OP_NO_COMPRESSION |
                           SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
+#ifndef OPENSSL_NO_NEXTPROTONEG
   SSL_CTX_set_next_proto_select_cb(ssl_ctx, select_next_proto_cb, NULL);
+#endif /* !OPENSSL_NO_NEXTPROTONEG */
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
   SSL_CTX_set_alpn_protos(ssl_ctx, (const unsigned char *)"\x02h2", 3);
-#endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
+#endif /* OPENSSL_VERSION_NUMBER >= 0x10002000L */
 
   return ssl_ctx;
 }
@@ -461,8 +479,10 @@ static void readcb(struct bufferevent *bev, void *ptr) {
    receiving GOAWAY, we check the some conditions on the nghttp2
    library and output buffer of bufferevent. If it indicates we have
    no business to this session, tear down the connection. */
-static void writecb(struct bufferevent *bev _U_, void *ptr) {
+static void writecb(struct bufferevent *bev, void *ptr) {
   http2_session_data *session_data = (http2_session_data *)ptr;
+  (void)bev;
+
   if (nghttp2_session_want_read(session_data->session) == 0 &&
       nghttp2_session_want_write(session_data->session) == 0 &&
       evbuffer_get_length(bufferevent_get_output(session_data->bev)) == 0) {
@@ -488,12 +508,14 @@ static void eventcb(struct bufferevent *bev, short events, void *ptr) {
 
     ssl = bufferevent_openssl_get_ssl(session_data->bev);
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
     SSL_get0_next_proto_negotiated(ssl, &alpn, &alpnlen);
+#endif /* !OPENSSL_NO_NEXTPROTONEG */
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
     if (alpn == NULL) {
       SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
     }
-#endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
+#endif /* OPENSSL_VERSION_NUMBER >= 0x10002000L */
 
     if (alpn == NULL || alpnlen != 2 || memcmp("h2", alpn, 2) != 0) {
       fprintf(stderr, "h2 is not negotiated\n");
@@ -532,6 +554,7 @@ static void initiate_connection(struct event_base *evbase, SSL_CTX *ssl_ctx,
   bev = bufferevent_openssl_socket_new(
       evbase, -1, ssl, BUFFEREVENT_SSL_CONNECTING,
       BEV_OPT_DEFER_CALLBACKS | BEV_OPT_CLOSE_ON_FREE);
+  bufferevent_enable(bev, EV_READ | EV_WRITE);
   bufferevent_setcb(bev, readcb, writecb, eventcb, session_data);
   rv = bufferevent_socket_connect_hostname(bev, session_data->dnsbase,
                                            AF_UNSPEC, host, port);

@@ -23,11 +23,11 @@
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #ifdef HAVE_CONFIG_H
-#include <config.h>
+#  include <config.h>
 #endif // HAVE_CONFIG_H
 
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif // HAVE_UNISTD_H
 #include <getopt.h>
 
@@ -373,7 +373,7 @@ OPTIONS:
             << std::endl;
 }
 
-static struct option long_options[] = {
+constexpr static struct option long_options[] = {
     {"http1text", no_argument, nullptr, 't'},
     {"table-size", required_argument, nullptr, 's'},
     {"deflate-table-size", required_argument, nullptr, 'S'},

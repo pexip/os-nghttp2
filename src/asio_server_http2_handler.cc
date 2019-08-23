@@ -253,7 +253,6 @@ http2_handler::~http2_handler() {
   for (auto &p : streams_) {
     auto &strm = p.second;
     strm->response().impl().call_on_close(NGHTTP2_INTERNAL_ERROR);
-    close_stream(strm->get_stream_id());
   }
 
   nghttp2_session_del(session_);
@@ -306,7 +305,8 @@ int http2_handler::start() {
 }
 
 stream *http2_handler::create_stream(int32_t stream_id) {
-  auto p = streams_.emplace(stream_id, make_unique<stream>(this, stream_id));
+  auto p =
+      streams_.emplace(stream_id, std::make_unique<stream>(this, stream_id));
   assert(p.second);
   return (*p.first).second.get();
 }

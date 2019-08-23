@@ -26,12 +26,13 @@
 #define SHRPX_ROUTER_TEST_H
 
 #ifdef HAVE_CONFIG_H
-#include <config.h>
+#  include <config.h>
 #endif // HAVE_CONFIG_H
 
 namespace shrpx {
 
 void test_shrpx_router_match(void);
+void test_shrpx_router_match_wildcard(void);
 void test_shrpx_router_match_prefix(void);
 
 } // namespace shrpx

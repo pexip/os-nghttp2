@@ -35,9 +35,11 @@
 #include "shrpx_downstream_connection_pool.h"
 #include "shrpx_worker.h"
 #include "shrpx_http2_session.h"
-#include "shrpx_ssl.h"
+#include "shrpx_tls.h"
+#include "shrpx_log.h"
 #include "http2.h"
 #include "util.h"
+#include "ssl_compat.h"
 
 using namespace nghttp2;
 
@@ -71,6 +73,48 @@ void timeoutcb(struct ev_loop *loop, ev_timer *w, int revents) {
 } // namespace
 
 namespace {
+void retry_downstream_connection(Downstream *downstream,
+                                 unsigned int status_code) {
+  auto upstream = downstream->get_upstream();
+  auto handler = upstream->get_client_handler();
+
+  downstream->add_retry();
+
+  if (downstream->no_more_retry()) {
+    delete handler;
+    return;
+  }
+
+  downstream->pop_downstream_connection();
+
+  int rv;
+  // We have to use h1 backend for retry if we have already written h1
+  // request in request buffer.
+  auto ndconn = handler->get_downstream_connection(
+      rv, downstream,
+      downstream->get_request_header_sent() ? Proto::HTTP1 : Proto::NONE);
+  if (ndconn) {
+    if (downstream->attach_downstream_connection(std::move(ndconn)) == 0 &&
+        downstream->push_request_headers() == 0) {
+      return;
+    }
+  }
+
+  downstream->set_request_state(DownstreamState::CONNECT_FAIL);
+
+  if (rv == SHRPX_ERR_TLS_REQUIRED) {
+    rv = upstream->on_downstream_abort_request_with_https_redirect(downstream);
+  } else {
+    rv = upstream->on_downstream_abort_request(downstream, status_code);
+  }
+
+  if (rv != 0) {
+    delete handler;
+  }
+}
+} // namespace
+
+namespace {
 void connect_timeoutcb(struct ev_loop *loop, ev_timer *w, int revents) {
   auto conn = static_cast<Connection *>(w->data);
   auto dconn = static_cast<HttpDownstreamConnection *>(conn->data);
@@ -83,23 +127,8 @@ void connect_timeoutcb(struct ev_loop *loop, ev_timer *w, int revents) {
   downstream_failure(addr, raddr);
 
   auto downstream = dconn->get_downstream();
-  auto upstream = downstream->get_upstream();
-  auto handler = upstream->get_client_handler();
 
-  downstream->pop_downstream_connection();
-
-  auto ndconn = handler->get_downstream_connection(downstream);
-  if (ndconn) {
-    if (downstream->attach_downstream_connection(std::move(ndconn)) == 0) {
-      return;
-    }
-  }
-
-  downstream->set_request_state(Downstream::CONNECT_FAIL);
-
-  if (upstream->on_downstream_abort_request(downstream, 504) != 0) {
-    delete handler;
-  }
+  retry_downstream_connection(downstream, 504);
 }
 } // namespace
 
@@ -119,30 +148,7 @@ void readcb(struct ev_loop *loop, ev_io *w, int revents) {
 
 namespace {
 void backend_retry(Downstream *downstream) {
-  auto upstream = downstream->get_upstream();
-  auto handler = upstream->get_client_handler();
-
-  downstream->add_retry();
-
-  if (downstream->no_more_retry()) {
-    delete handler;
-    return;
-  }
-
-  downstream->pop_downstream_connection();
-
-  auto ndconn = handler->get_downstream_connection(downstream);
-  if (ndconn) {
-    if (downstream->attach_downstream_connection(std::move(ndconn)) == 0) {
-      return;
-    }
-  }
-
-  downstream->set_request_state(Downstream::CONNECT_FAIL);
-
-  if (upstream->on_downstream_abort_request(downstream, 503) != 0) {
-    delete handler;
-  }
+  retry_downstream_connection(downstream, 502);
 }
 } // namespace
 
@@ -181,17 +187,16 @@ void connectcb(struct ev_loop *loop, ev_io *w, int revents) {
 } // namespace
 
 HttpDownstreamConnection::HttpDownstreamConnection(
-    const std::shared_ptr<DownstreamAddrGroup> &group, ssize_t initial_addr_idx,
+    const std::shared_ptr<DownstreamAddrGroup> &group, size_t initial_addr_idx,
     struct ev_loop *loop, Worker *worker)
     : conn_(loop, -1, nullptr, worker->get_mcpool(),
-            worker->get_downstream_config()->timeout.write,
-            worker->get_downstream_config()->timeout.read, {}, {}, connectcb,
-            readcb, connect_timeoutcb, this,
+            group->shared_addr->timeout.write, group->shared_addr->timeout.read,
+            {}, {}, connectcb, readcb, connect_timeoutcb, this,
             get_config()->tls.dyn_rec.warmup_threshold,
-            get_config()->tls.dyn_rec.idle_timeout, PROTO_HTTP1),
-      do_read_(&HttpDownstreamConnection::noop),
-      do_write_(&HttpDownstreamConnection::noop),
-      do_signal_write_(&HttpDownstreamConnection::noop),
+            get_config()->tls.dyn_rec.idle_timeout, Proto::HTTP1),
+      on_read_(&HttpDownstreamConnection::noop),
+      on_write_(&HttpDownstreamConnection::noop),
+      signal_write_(&HttpDownstreamConnection::noop),
       worker_(worker),
       ssl_ctx_(worker->get_cl_ssl_ctx()),
       group_(group),
@@ -254,8 +259,9 @@ int HttpDownstreamConnection::initiate_connection() {
     // initial_addr_idx_.
     size_t temp_idx = initial_addr_idx_;
 
-    auto &next_downstream =
-        shared_addr->affinity == AFFINITY_NONE ? shared_addr->next : temp_idx;
+    auto &next_downstream = shared_addr->affinity.type == SessionAffinity::NONE
+                                ? shared_addr->next
+                                : temp_idx;
     auto end = next_downstream;
     for (;;) {
       auto check_dns_result = dns_query_.get() != nullptr;
@@ -268,13 +274,19 @@ int HttpDownstreamConnection::initiate_connection() {
         assert(addr->dns);
       } else {
         assert(addr_ == nullptr);
-        addr = &addrs[next_downstream];
-
-        if (++next_downstream >= addrs.size()) {
-          next_downstream = 0;
+        if (shared_addr->affinity.type == SessionAffinity::NONE) {
+          addr = &addrs[next_downstream];
+          if (++next_downstream >= addrs.size()) {
+            next_downstream = 0;
+          }
+        } else {
+          addr = &addrs[shared_addr->affinity_hash[next_downstream].idx];
+          if (++next_downstream >= shared_addr->affinity_hash.size()) {
+            next_downstream = 0;
+          }
         }
 
-        if (addr->proto != PROTO_HTTP1) {
+        if (addr->proto != Proto::HTTP1) {
           if (end == next_downstream) {
             return SHRPX_ERR_NETWORK;
           }
@@ -304,11 +316,12 @@ int HttpDownstreamConnection::initiate_connection() {
 
       if (addr->dns) {
         if (!check_dns_result) {
-          auto dns_query = make_unique<DNSQuery>(
-              addr->host, [this](int status, const Address *result) {
+          auto dns_query = std::make_unique<DNSQuery>(
+              addr->host,
+              [this](DNSResolverStatus status, const Address *result) {
                 int rv;
 
-                if (status == DNS_STATUS_OK) {
+                if (status == DNSResolverStatus::OK) {
                   *this->resolved_addr_ = *result;
                 }
 
@@ -323,33 +336,32 @@ int HttpDownstreamConnection::initiate_connection() {
           auto dns_tracker = worker_->get_dns_tracker();
 
           if (!resolved_addr_) {
-            resolved_addr_ = make_unique<Address>();
+            resolved_addr_ = std::make_unique<Address>();
           }
-          rv = dns_tracker->resolve(resolved_addr_.get(), dns_query.get());
-          switch (rv) {
-          case DNS_STATUS_ERROR:
+          switch (dns_tracker->resolve(resolved_addr_.get(), dns_query.get())) {
+          case DNSResolverStatus::ERROR:
             downstream_failure(addr, nullptr);
             if (end == next_downstream) {
               return SHRPX_ERR_NETWORK;
             }
             continue;
-          case DNS_STATUS_RUNNING:
+          case DNSResolverStatus::RUNNING:
             dns_query_ = std::move(dns_query);
             // Remember current addr
             addr_ = addr;
             return 0;
-          case DNS_STATUS_OK:
+          case DNSResolverStatus::OK:
             break;
           default:
             assert(0);
           }
         } else {
           switch (dns_query_->status) {
-          case DNS_STATUS_ERROR:
+          case DNSResolverStatus::ERROR:
             dns_query_.reset();
             downstream_failure(addr, nullptr);
             continue;
-          case DNS_STATUS_OK:
+          case DNSResolverStatus::OK:
             dns_query_.reset();
             break;
           default:
@@ -408,14 +420,15 @@ int HttpDownstreamConnection::initiate_connection() {
       if (addr_->tls) {
         assert(ssl_ctx_);
 
-        auto ssl = ssl::create_ssl(ssl_ctx_);
+        auto ssl = tls::create_ssl(ssl_ctx_);
         if (!ssl) {
           return -1;
         }
 
-        ssl::setup_downstream_http1_alpn(ssl);
+        tls::setup_downstream_http1_alpn(ssl);
 
         conn_.set_ssl(ssl);
+        conn_.tls.client_session_cache = &addr_->tls_session_cache;
 
         auto sni_name =
             addr_->sni.empty() ? StringRef{addr_->host} : StringRef{addr_->sni};
@@ -423,7 +436,7 @@ int HttpDownstreamConnection::initiate_connection() {
           SSL_set_tlsext_host_name(conn_.tls.ssl, sni_name.c_str());
         }
 
-        auto session = ssl::reuse_tls_session(addr_->tls_session_cache);
+        auto session = tls::reuse_tls_session(addr_->tls_session_cache);
         if (session) {
           SSL_set_session(conn_.tls.ssl, session);
           SSL_SESSION_free(session);
@@ -445,16 +458,16 @@ int HttpDownstreamConnection::initiate_connection() {
   } else {
     // we may set read timer cb to idle_timeoutcb.  Reset again.
     ev_set_cb(&conn_.rt, timeoutcb);
-    if (conn_.read_timeout < downstreamconf.timeout.read) {
-      conn_.read_timeout = downstreamconf.timeout.read;
+    if (conn_.read_timeout < group_->shared_addr->timeout.read) {
+      conn_.read_timeout = group_->shared_addr->timeout.read;
       conn_.last_read = ev_now(conn_.loop);
     } else {
-      conn_.again_rt(downstreamconf.timeout.read);
+      conn_.again_rt(group_->shared_addr->timeout.read);
     }
 
     ev_set_cb(&conn_.rev, readcb);
 
-    do_write_ = &HttpDownstreamConnection::write_reuse_first;
+    on_write_ = &HttpDownstreamConnection::write_reuse_first;
     reuse_first_write_done_ = false;
   }
 
@@ -466,6 +479,7 @@ int HttpDownstreamConnection::initiate_connection() {
 
 int HttpDownstreamConnection::push_request_headers() {
   if (downstream_->get_request_header_sent()) {
+    signal_write();
     return 0;
   }
 
@@ -474,7 +488,7 @@ int HttpDownstreamConnection::push_request_headers() {
 
   auto &balloc = downstream_->get_block_allocator();
 
-  auto connect_method = req.method == HTTP_CONNECT;
+  auto connect_method = req.regular_connect_method();
 
   auto config = get_config();
   auto &httpconf = config->http;
@@ -498,7 +512,8 @@ int HttpDownstreamConnection::push_request_headers() {
   auto buf = downstream_->get_request_buf();
 
   // Assume that method and request path do not contain \r\n.
-  auto meth = http2::to_method_string(req.method);
+  auto meth = http2::to_method_string(
+      req.connect_proto == ConnectProto::WEBSOCKET ? HTTP_GET : req.method);
   buf->append(meth);
   buf->append(' ');
 
@@ -522,7 +537,19 @@ int HttpDownstreamConnection::push_request_headers() {
   buf->append(authority);
   buf->append("\r\n");
 
-  http2::build_http1_headers_from_headers(buf, req.fs.headers());
+  auto &fwdconf = httpconf.forwarded;
+  auto &xffconf = httpconf.xff;
+  auto &xfpconf = httpconf.xfp;
+  auto &earlydataconf = httpconf.early_data;
+
+  uint32_t build_flags =
+      (fwdconf.strip_incoming ? http2::HDOP_STRIP_FORWARDED : 0) |
+      (xffconf.strip_incoming ? http2::HDOP_STRIP_X_FORWARDED_FOR : 0) |
+      (xfpconf.strip_incoming ? http2::HDOP_STRIP_X_FORWARDED_PROTO : 0) |
+      (earlydataconf.strip_incoming ? http2::HDOP_STRIP_EARLY_DATA : 0) |
+      (req.http_major == 2 ? http2::HDOP_STRIP_SEC_WEBSOCKET_KEY : 0);
+
+  http2::build_http1_headers_from_headers(buf, req.fs.headers(), build_flags);
 
   auto cookie = downstream_->assemble_request_cookie();
   if (!cookie.empty()) {
@@ -533,16 +560,30 @@ int HttpDownstreamConnection::push_request_headers() {
 
   // set transfer-encoding only when content-length is unknown and
   // request body is expected.
-  if (!connect_method && req.http2_expect_body && req.fs.content_length == -1) {
+  if (req.method != HTTP_CONNECT && req.http2_expect_body &&
+      req.fs.content_length == -1) {
     downstream_->set_chunked_request(true);
     buf->append("Transfer-Encoding: chunked\r\n");
   }
 
-  if (req.connection_close) {
-    buf->append("Connection: close\r\n");
-  }
+  if (req.connect_proto == ConnectProto::WEBSOCKET) {
+    if (req.http_major == 2) {
+      std::array<uint8_t, 16> nonce;
+      util::random_bytes(std::begin(nonce), std::end(nonce),
+                         worker_->get_randgen());
+      auto iov = make_byte_ref(balloc, base64::encode_length(nonce.size()) + 1);
+      auto p = base64::encode(std::begin(nonce), std::end(nonce), iov.base);
+      *p = '\0';
+      auto key = StringRef{iov.base, p};
+      downstream_->set_ws_key(key);
 
-  if (!connect_method && req.upgrade_request) {
+      buf->append("Sec-Websocket-Key: ");
+      buf->append(key);
+      buf->append("\r\n");
+    }
+
+    buf->append("Upgrade: websocket\r\nConnection: Upgrade\r\n");
+  } else if (!connect_method && req.upgrade_request) {
     auto connection = req.fs.header(http2::HD_CONNECTION);
     if (connection) {
       buf->append("Connection: ");
@@ -556,12 +597,20 @@ int HttpDownstreamConnection::push_request_headers() {
       buf->append((*upgrade).value);
       buf->append("\r\n");
     }
+  } else if (req.connection_close) {
+    buf->append("Connection: close\r\n");
   }
 
   auto upstream = downstream_->get_upstream();
   auto handler = upstream->get_client_handler();
 
-  auto &fwdconf = httpconf.forwarded;
+#if OPENSSL_1_1_1_API
+  auto conn = handler->get_connection();
+
+  if (conn->tls.ssl && !SSL_is_init_finished(conn->tls.ssl)) {
+    buf->append("Early-Data: 1\r\n");
+  }
+#endif // OPENSSL_1_1_1_API
 
   auto fwd =
       fwdconf.strip_incoming ? nullptr : req.fs.header(http2::HD_FORWARDED);
@@ -595,8 +644,6 @@ int HttpDownstreamConnection::push_request_headers() {
     buf->append("\r\n");
   }
 
-  auto &xffconf = httpconf.xff;
-
   auto xff = xffconf.strip_incoming ? nullptr
                                     : req.fs.header(http2::HD_X_FORWARDED_FOR);
 
@@ -614,10 +661,24 @@ int HttpDownstreamConnection::push_request_headers() {
     buf->append("\r\n");
   }
   if (!config->http2_proxy && !connect_method) {
-    buf->append("X-Forwarded-Proto: ");
-    assert(!req.scheme.empty());
-    buf->append(req.scheme);
-    buf->append("\r\n");
+    auto xfp = xfpconf.strip_incoming
+                   ? nullptr
+                   : req.fs.header(http2::HD_X_FORWARDED_PROTO);
+
+    if (xfpconf.add) {
+      buf->append("X-Forwarded-Proto: ");
+      if (xfp) {
+        buf->append((*xfp).value);
+        buf->append(", ");
+      }
+      assert(!req.scheme.empty());
+      buf->append(req.scheme);
+      buf->append("\r\n");
+    } else if (xfp) {
+      buf->append("X-Forwarded-Proto: ");
+      buf->append((*xfp).value);
+      buf->append("\r\n");
+    }
   }
   auto via = req.fs.header(http2::HD_VIA);
   if (httpconf.no_via) {
@@ -664,9 +725,36 @@ int HttpDownstreamConnection::push_request_headers() {
   // Don't call signal_write() if we anticipate request body.  We call
   // signal_write() when we received request body chunk, and it
   // enables us to send headers and data in one writev system call.
-  if (connect_method ||
+  if (req.method == HTTP_CONNECT ||
+      downstream_->get_blocked_request_buf()->rleft() ||
       (!req.http2_expect_body && req.fs.content_length == 0)) {
     signal_write();
+  }
+
+  return process_blocked_request_buf();
+}
+
+int HttpDownstreamConnection::process_blocked_request_buf() {
+  auto src = downstream_->get_blocked_request_buf();
+
+  if (src->rleft()) {
+    auto dest = downstream_->get_request_buf();
+    auto chunked = downstream_->get_chunked_request();
+    if (chunked) {
+      auto chunk_size_hex = util::utox(src->rleft());
+      dest->append(chunk_size_hex);
+      dest->append("\r\n");
+    }
+
+    src->remove(*dest);
+
+    if (chunked) {
+      dest->append("\r\n");
+    }
+  }
+
+  if (downstream_->get_blocked_request_data_eof()) {
+    return end_upload_data();
   }
 
   return 0;
@@ -709,7 +797,8 @@ int HttpDownstreamConnection::end_upload_data() {
     output->append("0\r\n\r\n");
   } else {
     output->append("0\r\n");
-    http2::build_http1_headers_from_headers(output, trailers);
+    http2::build_http1_headers_from_headers(output, trailers,
+                                            http2::HDOP_STRIP_ALL);
     output->append("\r\n");
   }
 
@@ -718,16 +807,6 @@ int HttpDownstreamConnection::end_upload_data() {
 
 namespace {
 void remove_from_pool(HttpDownstreamConnection *dconn) {
-  auto &group = dconn->get_downstream_addr_group();
-  auto &shared_addr = group->shared_addr;
-
-  if (shared_addr->affinity == AFFINITY_NONE) {
-    auto &dconn_pool =
-        dconn->get_downstream_addr_group()->shared_addr->dconn_pool;
-    dconn_pool.remove_downstream_connection(dconn);
-    return;
-  }
-
   auto addr = dconn->get_addr();
   auto &dconn_pool = addr->dconn_pool;
   dconn_pool->remove_downstream_connection(dconn);
@@ -752,8 +831,10 @@ void idle_timeoutcb(struct ev_loop *loop, ev_timer *w, int revents) {
   auto conn = static_cast<Connection *>(w->data);
   auto dconn = static_cast<HttpDownstreamConnection *>(conn->data);
 
-  // We don't have to check conn->expired_rt() since we restart timer
-  // when connection gets idle.
+  if (w == &conn->rt && !conn->expired_rt()) {
+    return;
+  }
+
   if (LOG_ENABLED(INFO)) {
     DCLOG(INFO, dconn) << "Idle connection timeout";
   }
@@ -810,7 +891,7 @@ namespace {
 int htp_msg_begincb(http_parser *htp) {
   auto downstream = static_cast<Downstream *>(htp->data);
 
-  if (downstream->get_response_state() != Downstream::INITIAL) {
+  if (downstream->get_response_state() != DownstreamState::INITIAL) {
     return -1;
   }
 
@@ -822,19 +903,22 @@ namespace {
 int htp_hdrs_completecb(http_parser *htp) {
   auto downstream = static_cast<Downstream *>(htp->data);
   auto upstream = downstream->get_upstream();
+  auto handler = upstream->get_client_handler();
   const auto &req = downstream->request();
   auto &resp = downstream->response();
   int rv;
+
+  auto config = get_config();
+  auto &loggingconf = config->logging;
 
   resp.http_status = htp->status_code;
   resp.http_major = htp->http_major;
   resp.http_minor = htp->http_minor;
 
-  if (resp.http_major > 1) {
-    // Normalize HTTP version, since we use http_major == 2 specially
-    // in Downstream::expect_response_trailer().
+  if (resp.http_major > 1 || req.http_minor > 1) {
     resp.http_major = 1;
     resp.http_minor = 1;
+    return -1;
   }
 
   auto dconn = downstream->get_downstream_connection();
@@ -844,7 +928,7 @@ int htp_hdrs_completecb(http_parser *htp) {
 
   // Server MUST NOT send Transfer-Encoding with a status code 1xx or
   // 204.  Also server MUST NOT send Transfer-Encoding with a status
-  // code 200 to a CONNECT request.  Same holds true with
+  // code 2xx to a CONNECT request.  Same holds true with
   // Content-Length.
   if (resp.http_status == 204) {
     if (resp.fs.header(http2::HD_TRANSFER_ENCODING)) {
@@ -858,28 +942,27 @@ int htp_hdrs_completecb(http_parser *htp) {
     if (resp.fs.parse_content_length() != 0) {
       return -1;
     }
-    if (resp.fs.content_length != 0) {
-      return -1;
-    }
     if (resp.fs.content_length == 0) {
       auto cl = resp.fs.header(http2::HD_CONTENT_LENGTH);
       assert(cl);
       http2::erase_header(cl);
+    } else if (resp.fs.content_length != -1) {
+      return -1;
     }
   } else if (resp.http_status / 100 == 1 ||
-             (resp.http_status == 200 && req.method == HTTP_CONNECT)) {
+             (resp.http_status / 100 == 2 && req.method == HTTP_CONNECT)) {
     if (resp.fs.header(http2::HD_CONTENT_LENGTH) ||
         resp.fs.header(http2::HD_TRANSFER_ENCODING)) {
       return -1;
     }
   } else if (resp.fs.parse_content_length() != 0) {
-    downstream->set_response_state(Downstream::MSG_BAD_HEADER);
+    downstream->set_response_state(DownstreamState::MSG_BAD_HEADER);
     return -1;
   }
 
   // Check upgrade before processing non-final response, since if
   // upgrade succeeded, 101 response is treated as final in nghttpx.
-  downstream->check_upgrade_fulfilled();
+  downstream->check_upgrade_fulfilled_http1();
 
   if (downstream->get_non_final_response()) {
     // Reset content-length because we reuse same Downstream for the
@@ -899,7 +982,7 @@ int htp_hdrs_completecb(http_parser *htp) {
   }
 
   resp.connection_close = !http_should_keep_alive(htp);
-  downstream->set_response_state(Downstream::HEADER_COMPLETE);
+  downstream->set_response_state(DownstreamState::HEADER_COMPLETE);
   downstream->inspect_http1_response();
   if (downstream->get_upgraded()) {
     // content-length must be ignored for upgraded connection.
@@ -907,8 +990,18 @@ int htp_hdrs_completecb(http_parser *htp) {
     resp.connection_close = true;
     // transfer-encoding not applied to upgraded connection
     downstream->set_chunked_response(false);
+  } else if (http2::legacy_http1(req.http_major, req.http_minor)) {
+    if (resp.fs.content_length == -1) {
+      resp.connection_close = true;
+    }
+    downstream->set_chunked_response(false);
   } else if (!downstream->expect_response_body()) {
     downstream->set_chunked_response(false);
+  }
+
+  if (loggingconf.access.write_early && downstream->accesslog_ready()) {
+    handler->write_accesslog(downstream);
+    downstream->set_accesslog_written(true);
   }
 
   if (upstream->on_downstream_header_complete(downstream) != 0) {
@@ -920,7 +1013,7 @@ int htp_hdrs_completecb(http_parser *htp) {
     if (upstream->resume_read(SHRPX_NO_BUFFER, downstream, 0) != 0) {
       return -1;
     }
-    downstream->set_request_state(Downstream::HEADER_COMPLETE);
+    downstream->set_request_state(DownstreamState::HEADER_COMPLETE);
     if (LOG_ENABLED(INFO)) {
       LOG(INFO) << "HTTP upgrade success. stream_id="
                 << downstream->get_stream_id();
@@ -963,8 +1056,8 @@ int ensure_max_header_fields(const Downstream *downstream,
 
   if (resp.fs.num_fields() >= httpconf.max_response_header_fields) {
     if (LOG_ENABLED(INFO)) {
-      DLOG(INFO, downstream) << "Too many header field num="
-                             << resp.fs.num_fields() + 1;
+      DLOG(INFO, downstream)
+          << "Too many header field num=" << resp.fs.num_fields() + 1;
     }
     return -1;
   }
@@ -983,7 +1076,7 @@ int htp_hdr_keycb(http_parser *htp, const char *data, size_t len) {
     return -1;
   }
 
-  if (downstream->get_response_state() == Downstream::INITIAL) {
+  if (downstream->get_response_state() == DownstreamState::INITIAL) {
     if (resp.fs.header_key_prev()) {
       resp.fs.append_last_header_key(data, len);
     } else {
@@ -1020,7 +1113,7 @@ int htp_hdr_valcb(http_parser *htp, const char *data, size_t len) {
     return -1;
   }
 
-  if (downstream->get_response_state() == Downstream::INITIAL) {
+  if (downstream->get_response_state() == DownstreamState::INITIAL) {
     resp.fs.append_last_header_value(data, len);
   } else {
     resp.fs.append_last_trailer_value(data, len);
@@ -1060,7 +1153,7 @@ int htp_msg_completecb(http_parser *htp) {
     return 0;
   }
 
-  downstream->set_response_state(Downstream::MSG_COMPLETE);
+  downstream->set_response_state(DownstreamState::MSG_COMPLETE);
   // Block reading another response message from (broken?)
   // server. This callback is not called if the connection is
   // tunneled.
@@ -1070,7 +1163,7 @@ int htp_msg_completecb(http_parser *htp) {
 } // namespace
 
 namespace {
-http_parser_settings htp_hooks = {
+constexpr http_parser_settings htp_hooks = {
     htp_msg_begincb,     // http_cb on_message_begin;
     nullptr,             // http_data_cb on_url;
     nullptr,             // http_data_cb on_status;
@@ -1096,9 +1189,9 @@ int HttpDownstreamConnection::write_reuse_first() {
   }
 
   if (conn_.tls.ssl) {
-    do_write_ = &HttpDownstreamConnection::write_tls;
+    on_write_ = &HttpDownstreamConnection::write_tls;
   } else {
-    do_write_ = &HttpDownstreamConnection::write_clear;
+    on_write_ = &HttpDownstreamConnection::write_clear;
   }
 
   reuse_first_write_done_ = true;
@@ -1158,7 +1251,7 @@ int HttpDownstreamConnection::write_clear() {
       // part of response body.  So keep reading.  Invoke read event
       // to get read(2) error just in case.
       ev_feed_event(conn_.loop, &conn_.rev, EV_READ);
-      do_write_ = &HttpDownstreamConnection::noop;
+      on_write_ = &HttpDownstreamConnection::noop;
       reusable_ = false;
       break;
     }
@@ -1200,31 +1293,23 @@ int HttpDownstreamConnection::tls_handshake() {
   }
 
   if (!get_config()->tls.insecure &&
-      ssl::check_cert(conn_.tls.ssl, addr_, raddr_) != 0) {
+      tls::check_cert(conn_.tls.ssl, addr_, raddr_) != 0) {
     downstream_failure(addr_, raddr_);
 
     return -1;
   }
 
-  if (!SSL_session_reused(conn_.tls.ssl)) {
-    auto session = SSL_get0_session(conn_.tls.ssl);
-    if (session) {
-      ssl::try_cache_tls_session(addr_->tls_session_cache, *raddr_, session,
-                                 ev_now(conn_.loop));
-    }
-  }
-
   auto &connect_blocker = addr_->connect_blocker;
 
-  do_signal_write_ = &HttpDownstreamConnection::actual_signal_write;
+  signal_write_ = &HttpDownstreamConnection::actual_signal_write;
 
   connect_blocker->on_success();
 
   ev_set_cb(&conn_.rt, timeoutcb);
   ev_set_cb(&conn_.wt, timeoutcb);
 
-  do_read_ = &HttpDownstreamConnection::read_tls;
-  do_write_ = &HttpDownstreamConnection::write_tls;
+  on_read_ = &HttpDownstreamConnection::read_tls;
+  on_write_ = &HttpDownstreamConnection::write_tls;
 
   // TODO Check negotiated ALPN
 
@@ -1272,7 +1357,10 @@ int HttpDownstreamConnection::write_tls() {
 
   while (input->rleft() > 0) {
     auto iovcnt = input->riovec(&iov, 1);
-    assert(iovcnt == 1);
+    if (iovcnt != 1) {
+      assert(0);
+      return -1;
+    }
     auto nwrite = conn_.write_tls(iov.iov_base, iov.iov_len);
 
     if (nwrite == 0) {
@@ -1287,7 +1375,7 @@ int HttpDownstreamConnection::write_tls() {
       // part of response body.  So keep reading.  Invoke read event
       // to get read(2) error just in case.
       ev_feed_event(conn_.loop, &conn_.rev, EV_READ);
-      do_write_ = &HttpDownstreamConnection::noop;
+      on_write_ = &HttpDownstreamConnection::noop;
       reusable_ = false;
       break;
     }
@@ -1337,7 +1425,7 @@ int HttpDownstreamConnection::process_input(const uint8_t *data,
   if (htperr != HPE_OK) {
     // Handling early return (in other words, response was hijacked by
     // mruby scripting).
-    if (downstream_->get_response_state() == Downstream::MSG_COMPLETE) {
+    if (downstream_->get_response_state() == DownstreamState::MSG_COMPLETE) {
       return SHRPX_ERR_DCONN_CANCELED;
     }
 
@@ -1395,10 +1483,8 @@ int HttpDownstreamConnection::connected() {
     DCLOG(INFO, this) << "Connected to downstream host";
   }
 
-  auto &downstreamconf = *get_config()->conn.downstream;
-
   // Reset timeout for write.  Previously, we set timeout for connect.
-  conn_.wt.repeat = downstreamconf.timeout.write;
+  conn_.wt.repeat = group_->shared_addr->timeout.write;
   ev_timer_again(conn_.loop, &conn_.wt);
 
   conn_.rlimit.startw();
@@ -1407,32 +1493,32 @@ int HttpDownstreamConnection::connected() {
   ev_set_cb(&conn_.wev, writecb);
 
   if (conn_.tls.ssl) {
-    do_read_ = &HttpDownstreamConnection::tls_handshake;
-    do_write_ = &HttpDownstreamConnection::tls_handshake;
+    on_read_ = &HttpDownstreamConnection::tls_handshake;
+    on_write_ = &HttpDownstreamConnection::tls_handshake;
 
     return 0;
   }
 
-  do_signal_write_ = &HttpDownstreamConnection::actual_signal_write;
+  signal_write_ = &HttpDownstreamConnection::actual_signal_write;
 
   connect_blocker->on_success();
 
   ev_set_cb(&conn_.rt, timeoutcb);
   ev_set_cb(&conn_.wt, timeoutcb);
 
-  do_read_ = &HttpDownstreamConnection::read_clear;
-  do_write_ = &HttpDownstreamConnection::write_clear;
+  on_read_ = &HttpDownstreamConnection::read_clear;
+  on_write_ = &HttpDownstreamConnection::write_clear;
 
   return 0;
 }
 
-int HttpDownstreamConnection::on_read() { return do_read_(*this); }
+int HttpDownstreamConnection::on_read() { return on_read_(*this); }
 
-int HttpDownstreamConnection::on_write() { return do_write_(*this); }
+int HttpDownstreamConnection::on_write() { return on_write_(*this); }
 
 void HttpDownstreamConnection::on_upstream_change(Upstream *upstream) {}
 
-void HttpDownstreamConnection::signal_write() { do_signal_write_(*this); }
+void HttpDownstreamConnection::signal_write() { signal_write_(*this); }
 
 int HttpDownstreamConnection::actual_signal_write() {
   ev_feed_event(conn_.loop, &conn_.wev, EV_WRITE);

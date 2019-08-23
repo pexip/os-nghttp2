@@ -45,7 +45,7 @@
 /* 3rd parameter is nghttp2_token value for header field name.  We use
    first enum value if same header names are repeated (e.g.,
    :status). */
-static nghttp2_hd_static_entry static_table[] = {
+static const nghttp2_hd_static_entry static_table[] = {
     MAKE_STATIC_ENT(":authority", "", 0, 3153725150u),
     MAKE_STATIC_ENT(":method", "GET", 1, 695666056u),
     MAKE_STATIC_ENT(":method", "POST", 1, 695666056u),
@@ -267,6 +267,15 @@ static int32_t lookup_token(const uint8_t *name, size_t namelen) {
     case 'n':
       if (memeq("locatio", name, 7)) {
         return NGHTTP2_TOKEN_LOCATION;
+      }
+      break;
+    }
+    break;
+  case 9:
+    switch (name[8]) {
+    case 'l':
+      if (memeq(":protoco", name, 8)) {
+        return NGHTTP2_TOKEN__PROTOCOL;
       }
       break;
     }
@@ -662,9 +671,9 @@ static int hd_context_init(nghttp2_hd_context *context, nghttp2_mem *mem) {
   context->mem = mem;
   context->bad = 0;
   context->hd_table_bufsize_max = NGHTTP2_HD_DEFAULT_MAX_BUFFER_SIZE;
-  rv = hd_ringbuf_init(&context->hd_table, context->hd_table_bufsize_max /
-                                               NGHTTP2_HD_ENTRY_OVERHEAD,
-                       mem);
+  rv = hd_ringbuf_init(
+      &context->hd_table,
+      context->hd_table_bufsize_max / NGHTTP2_HD_ENTRY_OVERHEAD, mem);
   if (rv != 0) {
     return rv;
   }
@@ -1159,7 +1168,7 @@ static search_result search_static_table(const nghttp2_nv *nv, int32_t token,
                                          int name_only) {
   search_result res = {token, 0};
   int i;
-  nghttp2_hd_static_entry *ent;
+  const nghttp2_hd_static_entry *ent;
 
   if (name_only) {
     return res;
@@ -1184,7 +1193,7 @@ static search_result search_hd_table(nghttp2_hd_context *context,
                                      int indexing_mode, nghttp2_hd_map *map,
                                      uint32_t hash) {
   search_result res = {-1, 0};
-  nghttp2_hd_entry *ent;
+  const nghttp2_hd_entry *ent;
   int exact_match;
   int name_only = indexing_mode == NGHTTP2_HD_NEVER_INDEXING;
 
@@ -1289,8 +1298,9 @@ nghttp2_hd_nv nghttp2_hd_table_get(nghttp2_hd_context *context, size_t idx) {
     return hd_ringbuf_get(&context->hd_table, idx - NGHTTP2_STATIC_TABLE_LENGTH)
         ->nv;
   } else {
-    nghttp2_hd_static_entry *ent = &static_table[idx];
-    nghttp2_hd_nv nv = {&ent->name, &ent->value, ent->token,
+    const nghttp2_hd_static_entry *ent = &static_table[idx];
+    nghttp2_hd_nv nv = {(nghttp2_rcbuf *)&ent->name,
+                        (nghttp2_rcbuf *)&ent->value, ent->token,
                         NGHTTP2_NV_FLAG_NONE};
     return nv;
   }
@@ -1537,10 +1547,11 @@ ssize_t nghttp2_hd_deflate_hd_vec(nghttp2_hd_deflater *deflater,
   return (ssize_t)buflen;
 }
 
-size_t nghttp2_hd_deflate_bound(nghttp2_hd_deflater *deflater _U_,
+size_t nghttp2_hd_deflate_bound(nghttp2_hd_deflater *deflater,
                                 const nghttp2_nv *nva, size_t nvlen) {
   size_t n = 0;
   size_t i;
+  (void)deflater;
 
   /* Possible Maximum Header Table Size Change.  Encoding (1u << 31) -
      1 using 4 bit prefix requires 6 bytes.  We may emit this at most
@@ -2281,10 +2292,6 @@ ssize_t nghttp2_hd_decode_length(uint32_t *res, size_t *shift_ptr, int *fin,
   return decode_length(res, shift_ptr, fin, initial, shift, in, last, prefix);
 }
 
-static size_t hd_get_num_table_entries(nghttp2_hd_context *context) {
-  return context->hd_table.len + NGHTTP2_STATIC_TABLE_LENGTH;
-}
-
 static const nghttp2_nv *hd_get_table_entry(nghttp2_hd_context *context,
                                             size_t idx) {
   if (idx == 0) {
@@ -2301,7 +2308,7 @@ static const nghttp2_nv *hd_get_table_entry(nghttp2_hd_context *context,
 }
 
 size_t nghttp2_hd_deflate_get_num_table_entries(nghttp2_hd_deflater *deflater) {
-  return hd_get_num_table_entries(&deflater->ctx);
+  return get_max_index(&deflater->ctx);
 }
 
 const nghttp2_nv *
@@ -2320,7 +2327,7 @@ nghttp2_hd_deflate_get_max_dynamic_table_size(nghttp2_hd_deflater *deflater) {
 }
 
 size_t nghttp2_hd_inflate_get_num_table_entries(nghttp2_hd_inflater *inflater) {
-  return hd_get_num_table_entries(&inflater->ctx);
+  return get_max_index(&inflater->ctx);
 }
 
 const nghttp2_nv *

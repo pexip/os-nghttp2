@@ -28,7 +28,15 @@
 #include "nghttp2_config.h"
 
 #include <limits.h>
-#include <sys/uio.h>
+#ifdef _WIN32
+/* Structure for scatter/gather I/O.  */
+struct iovec {
+  void *iov_base; /* Pointer to data.  */
+  size_t iov_len; /* Length of data.  */
+};
+#else // !_WIN32
+#  include <sys/uio.h>
+#endif // !_WIN32
 
 #include <cassert>
 #include <cstring>
@@ -36,6 +44,7 @@
 #include <array>
 #include <algorithm>
 #include <string>
+#include <utility>
 
 #include "template.h"
 
@@ -44,29 +53,27 @@ namespace nghttp2 {
 #define DEFAULT_WR_IOVCNT 16
 
 #if defined(IOV_MAX) && IOV_MAX < DEFAULT_WR_IOVCNT
-#define MAX_WR_IOVCNT IOV_MAX
+#  define MAX_WR_IOVCNT IOV_MAX
 #else // !defined(IOV_MAX) || IOV_MAX >= DEFAULT_WR_IOVCNT
-#define MAX_WR_IOVCNT DEFAULT_WR_IOVCNT
+#  define MAX_WR_IOVCNT DEFAULT_WR_IOVCNT
 #endif // !defined(IOV_MAX) || IOV_MAX >= DEFAULT_WR_IOVCNT
 
 template <size_t N> struct Memchunk {
-  Memchunk(std::unique_ptr<Memchunk> next_chunk)
-      : pos(std::begin(buf)),
-        last(pos),
-        knext(std::move(next_chunk)),
-        next(nullptr) {}
+  Memchunk(Memchunk *next_chunk)
+      : pos(std::begin(buf)), last(pos), knext(next_chunk), next(nullptr) {}
   size_t len() const { return last - pos; }
   size_t left() const { return std::end(buf) - last; }
   void reset() { pos = last = std::begin(buf); }
   std::array<uint8_t, N> buf;
   uint8_t *pos, *last;
-  std::unique_ptr<Memchunk> knext;
+  Memchunk *knext;
   Memchunk *next;
   static const size_t size = N;
 };
 
 template <typename T> struct Pool {
   Pool() : pool(nullptr), freelist(nullptr), poolsize(0) {}
+  ~Pool() { clear(); }
   T *get() {
     if (freelist) {
       auto m = freelist;
@@ -76,9 +83,9 @@ template <typename T> struct Pool {
       return m;
     }
 
-    pool = make_unique<T>(std::move(pool));
+    pool = new T{pool};
     poolsize += T::size;
-    return pool.get();
+    return pool;
   }
   void recycle(T *m) {
     m->next = freelist;
@@ -86,11 +93,16 @@ template <typename T> struct Pool {
   }
   void clear() {
     freelist = nullptr;
+    for (auto p = pool; p;) {
+      auto knext = p->knext;
+      delete p;
+      p = knext;
+    }
     pool = nullptr;
     poolsize = 0;
   }
   using value_type = T;
-  std::unique_ptr<T> pool;
+  T *pool;
   T *freelist;
   size_t poolsize;
 };
@@ -100,11 +112,10 @@ template <typename Memchunk> struct Memchunks {
       : pool(pool), head(nullptr), tail(nullptr), len(0) {}
   Memchunks(const Memchunks &) = delete;
   Memchunks(Memchunks &&other) noexcept
-      : pool(other.pool), head(other.head), tail(other.tail), len(other.len) {
-    // keep other.pool
-    other.head = other.tail = nullptr;
-    other.len = 0;
-  }
+      : pool{other.pool}, // keep other.pool
+        head{std::exchange(other.head, nullptr)},
+        tail{std::exchange(other.tail, nullptr)},
+        len{std::exchange(other.len, 0)} {}
   Memchunks &operator=(const Memchunks &) = delete;
   Memchunks &operator=(Memchunks &&other) noexcept {
     if (this == &other) {
@@ -114,12 +125,9 @@ template <typename Memchunk> struct Memchunks {
     reset();
 
     pool = other.pool;
-    head = other.head;
-    tail = other.tail;
-    len = other.len;
-
-    other.head = other.tail = nullptr;
-    other.len = 0;
+    head = std::exchange(other.head, nullptr);
+    tail = std::exchange(other.tail, nullptr);
+    len = std::exchange(other.len, 0);
 
     return *this;
   }
@@ -240,6 +248,29 @@ template <typename Memchunk> struct Memchunks {
 
     return count - left;
   }
+  size_t remove(Memchunks &dest) {
+    assert(pool == dest.pool);
+
+    if (head == nullptr) {
+      return 0;
+    }
+
+    auto n = len;
+
+    if (dest.tail == nullptr) {
+      dest.head = head;
+    } else {
+      dest.tail->next = head;
+    }
+
+    dest.tail = tail;
+    dest.len += len;
+
+    head = tail = nullptr;
+    len = 0;
+
+    return n;
+  }
   size_t drain(size_t count) {
     auto ndata = count;
     auto m = head;
@@ -301,14 +332,12 @@ template <typename Memchunk> struct PeekMemchunks {
         peeking(true) {}
   PeekMemchunks(const PeekMemchunks &) = delete;
   PeekMemchunks(PeekMemchunks &&other) noexcept
-      : memchunks(std::move(other.memchunks)),
-        cur(other.cur),
-        cur_pos(other.cur_pos),
-        cur_last(other.cur_last),
-        len(other.len),
-        peeking(other.peeking) {
-    other.reset();
-  }
+      : memchunks{std::move(other.memchunks)},
+        cur{std::exchange(other.cur, nullptr)},
+        cur_pos{std::exchange(other.cur_pos, nullptr)},
+        cur_last{std::exchange(other.cur_last, nullptr)},
+        len{std::exchange(other.len, 0)},
+        peeking{std::exchange(other.peeking, true)} {}
   PeekMemchunks &operator=(const PeekMemchunks &) = delete;
   PeekMemchunks &operator=(PeekMemchunks &&other) noexcept {
     if (this == &other) {
@@ -316,13 +345,11 @@ template <typename Memchunk> struct PeekMemchunks {
     }
 
     memchunks = std::move(other.memchunks);
-    cur = other.cur;
-    cur_pos = other.cur_pos;
-    cur_last = other.cur_last;
-    len = other.len;
-    peeking = other.peeking;
-
-    other.reset();
+    cur = std::exchange(other.cur, nullptr);
+    cur_pos = std::exchange(other.cur_pos, nullptr);
+    cur_last = std::exchange(other.cur_last, nullptr);
+    len = std::exchange(other.len, 0);
+    peeking = std::exchange(other.peeking, true);
 
     return *this;
   }
@@ -433,6 +460,102 @@ inline int limit_iovec(struct iovec *iov, int iovcnt, size_t max) {
   }
   return iovcnt;
 }
+
+// MemchunkBuffer is similar to Buffer, but it uses pooled Memchunk
+// for its underlying buffer.
+template <typename Memchunk> struct MemchunkBuffer {
+  MemchunkBuffer(Pool<Memchunk> *pool) : pool(pool), chunk(nullptr) {}
+  MemchunkBuffer(const MemchunkBuffer &) = delete;
+  MemchunkBuffer(MemchunkBuffer &&other) noexcept
+      : pool(other.pool), chunk(other.chunk) {
+    other.chunk = nullptr;
+  }
+  MemchunkBuffer &operator=(const MemchunkBuffer &) = delete;
+  MemchunkBuffer &operator=(MemchunkBuffer &&other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+
+    pool = other.pool;
+    chunk = other.chunk;
+
+    other.chunk = nullptr;
+
+    return *this;
+  }
+
+  ~MemchunkBuffer() {
+    if (!pool || !chunk) {
+      return;
+    }
+    pool->recycle(chunk);
+  }
+
+  // Ensures that the underlying buffer is allocated.
+  void ensure_chunk() {
+    if (chunk) {
+      return;
+    }
+    chunk = pool->get();
+  }
+
+  // Releases the underlying buffer.
+  void release_chunk() {
+    if (!chunk) {
+      return;
+    }
+    pool->recycle(chunk);
+    chunk = nullptr;
+  }
+
+  // Returns true if the underlying buffer is allocated.
+  bool chunk_avail() const { return chunk != nullptr; }
+
+  // The functions below must be called after the underlying buffer is
+  // allocated (use ensure_chunk).
+
+  // MemchunkBuffer provides the same interface functions with Buffer.
+  // Since we has chunk as a member variable, pos and last are
+  // implemented as wrapper functions.
+
+  uint8_t *pos() const { return chunk->pos; }
+  uint8_t *last() const { return chunk->last; }
+
+  size_t rleft() const { return chunk->len(); }
+  size_t wleft() const { return chunk->left(); }
+  size_t write(const void *src, size_t count) {
+    count = std::min(count, wleft());
+    auto p = static_cast<const uint8_t *>(src);
+    chunk->last = std::copy_n(p, count, chunk->last);
+    return count;
+  }
+  size_t write(size_t count) {
+    count = std::min(count, wleft());
+    chunk->last += count;
+    return count;
+  }
+  size_t drain(size_t count) {
+    count = std::min(count, rleft());
+    chunk->pos += count;
+    return count;
+  }
+  size_t drain_reset(size_t count) {
+    count = std::min(count, rleft());
+    std::copy(chunk->pos + count, chunk->last, std::begin(chunk->buf));
+    chunk->last = std::begin(chunk->buf) + (chunk->last - (chunk->pos + count));
+    chunk->pos = std::begin(chunk->buf);
+    return count;
+  }
+  void reset() { chunk->reset(); }
+  uint8_t *begin() { return std::begin(chunk->buf); }
+  uint8_t &operator[](size_t n) { return chunk->buf[n]; }
+  const uint8_t &operator[](size_t n) const { return chunk->buf[n]; }
+
+  Pool<Memchunk> *pool;
+  Memchunk *chunk;
+};
+
+using DefaultMemchunkBuffer = MemchunkBuffer<Memchunk16K>;
 
 } // namespace nghttp2
 

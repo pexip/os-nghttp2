@@ -165,6 +165,11 @@ Enums
 
         (``-535``) 
         Indicates that a processing was canceled.
+    .. macro:: NGHTTP2_ERR_SETTINGS_EXPECTED
+
+        (``-536``) 
+        When a local endpoint expects to receive SETTINGS frame, it
+        receives an other type of frame.
     .. macro:: NGHTTP2_ERR_FATAL
 
         (``-900``) 
@@ -277,6 +282,11 @@ Enums
         (``0x0a``) 
         The ALTSVC frame, which is defined in `RFC 7383
         <https://tools.ietf.org/html/rfc7838#section-4>`_.
+    .. macro:: NGHTTP2_ORIGIN
+
+        (``0x0c``) 
+        The ORIGIN frame, which is defined by `RFC 8336
+        <https://tools.ietf.org/html/rfc8336>`_.
 
 .. type:: nghttp2_flag
 
@@ -337,6 +347,11 @@ Enums
 
         (``0x06``) 
         SETTINGS_MAX_HEADER_LIST_SIZE
+    .. macro:: NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL
+
+        (``0x08``) 
+        SETTINGS_ENABLE_CONNECT_PROTOCOL
+        (`RFC 8441 <https://tools.ietf.org/html/rfc8441>`_)
 
 .. type:: nghttp2_error_code
 
