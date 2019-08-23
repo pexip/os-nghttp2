@@ -1,3 +1,9 @@
+nghttp2 (1.18.1-1+deb9u1) stretch-security; urgency=high
+
+  * Fix CVE-2019-9511 and CVE-2019-9513
+
+ -- Tomasz Buchert <tomasz@debian.org>  Fri, 23 Aug 2019 19:05:18 +0200
+
 nghttp2 (1.18.1-1) unstable; urgency=medium
 
   * Imported upstream version 1.18.1
