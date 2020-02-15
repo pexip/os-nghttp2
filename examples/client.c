@@ -27,26 +27,26 @@
  * intentionally made simple.
  */
 #ifdef HAVE_CONFIG_H
-#include <config.h>
+#  include <config.h>
 #endif /* HAVE_CONFIG_H */
 
 #include <inttypes.h>
 #include <stdlib.h>
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif /* HAVE_UNISTD_H */
 #ifdef HAVE_FCNTL_H
-#include <fcntl.h>
+#  include <fcntl.h>
 #endif /* HAVE_FCNTL_H */
 #include <sys/types.h>
 #ifdef HAVE_SYS_SOCKET_H
-#include <sys/socket.h>
+#  include <sys/socket.h>
 #endif /* HAVE_SYS_SOCKET_H */
 #ifdef HAVE_NETDB_H
-#include <netdb.h>
+#  include <netdb.h>
 #endif /* HAVE_NETDB_H */
 #ifdef HAVE_NETINET_IN_H
-#include <netinet/in.h>
+#  include <netinet/in.h>
 #endif /* HAVE_NETINET_IN_H */
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -159,10 +159,13 @@ static void diec(const char *func, int error_code) {
  * bytes actually written. See the documentation of
  * nghttp2_send_callback for the details.
  */
-static ssize_t send_callback(nghttp2_session *session _U_, const uint8_t *data,
-                             size_t length, int flags _U_, void *user_data) {
+static ssize_t send_callback(nghttp2_session *session, const uint8_t *data,
+                             size_t length, int flags, void *user_data) {
   struct Connection *connection;
   int rv;
+  (void)session;
+  (void)flags;
+
   connection = (struct Connection *)user_data;
   connection->want_io = IO_NONE;
   ERR_clear_error();
@@ -186,10 +189,13 @@ static ssize_t send_callback(nghttp2_session *session _U_, const uint8_t *data,
  * |length| bytes. Returns the number of bytes stored in |buf|. See
  * the documentation of nghttp2_recv_callback for the details.
  */
-static ssize_t recv_callback(nghttp2_session *session _U_, uint8_t *buf,
-                             size_t length, int flags _U_, void *user_data) {
+static ssize_t recv_callback(nghttp2_session *session, uint8_t *buf,
+                             size_t length, int flags, void *user_data) {
   struct Connection *connection;
   int rv;
+  (void)session;
+  (void)flags;
+
   connection = (struct Connection *)user_data;
   connection->want_io = IO_NONE;
   ERR_clear_error();
@@ -210,9 +216,10 @@ static ssize_t recv_callback(nghttp2_session *session _U_, uint8_t *buf,
 }
 
 static int on_frame_send_callback(nghttp2_session *session,
-                                  const nghttp2_frame *frame,
-                                  void *user_data _U_) {
+                                  const nghttp2_frame *frame, void *user_data) {
   size_t i;
+  (void)user_data;
+
   switch (frame->hd.type) {
   case NGHTTP2_HEADERS:
     if (nghttp2_session_get_stream_user_data(session, frame->hd.stream_id)) {
@@ -237,9 +244,10 @@ static int on_frame_send_callback(nghttp2_session *session,
 }
 
 static int on_frame_recv_callback(nghttp2_session *session,
-                                  const nghttp2_frame *frame,
-                                  void *user_data _U_) {
+                                  const nghttp2_frame *frame, void *user_data) {
   size_t i;
+  (void)user_data;
+
   switch (frame->hd.type) {
   case NGHTTP2_HEADERS:
     if (frame->headers.cat == NGHTTP2_HCAT_RESPONSE) {
@@ -274,9 +282,11 @@ static int on_frame_recv_callback(nghttp2_session *session,
  * we submit GOAWAY and close the session.
  */
 static int on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
-                                    uint32_t error_code _U_,
-                                    void *user_data _U_) {
+                                    uint32_t error_code, void *user_data) {
   struct Request *req;
+  (void)error_code;
+  (void)user_data;
+
   req = nghttp2_session_get_stream_user_data(session, stream_id);
   if (req) {
     int rv;
@@ -293,11 +303,13 @@ static int on_stream_close_callback(nghttp2_session *session, int32_t stream_id,
  * The implementation of nghttp2_on_data_chunk_recv_callback type. We
  * use this function to print the received response body.
  */
-static int on_data_chunk_recv_callback(nghttp2_session *session,
-                                       uint8_t flags _U_, int32_t stream_id,
-                                       const uint8_t *data, size_t len,
-                                       void *user_data _U_) {
+static int on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
+                                       int32_t stream_id, const uint8_t *data,
+                                       size_t len, void *user_data) {
   struct Request *req;
+  (void)flags;
+  (void)user_data;
+
   req = nghttp2_session_get_stream_user_data(session, stream_id);
   if (req) {
     printf("[INFO] C <---------------------------- S (DATA chunk)\n"
@@ -333,15 +345,19 @@ static void setup_nghttp2_callbacks(nghttp2_session_callbacks *callbacks) {
       callbacks, on_data_chunk_recv_callback);
 }
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
 /*
  * Callback function for TLS NPN. Since this program only supports
  * HTTP/2 protocol, if server does not offer HTTP/2 the nghttp2
  * library supports, we terminate program.
  */
-static int select_next_proto_cb(SSL *ssl _U_, unsigned char **out,
+static int select_next_proto_cb(SSL *ssl, unsigned char **out,
                                 unsigned char *outlen, const unsigned char *in,
-                                unsigned int inlen, void *arg _U_) {
+                                unsigned int inlen, void *arg) {
   int rv;
+  (void)ssl;
+  (void)arg;
+
   /* nghttp2_select_next_protocol() selects HTTP/2 protocol the
      nghttp2 library supports. */
   rv = nghttp2_select_next_protocol(out, outlen, in, inlen);
@@ -350,6 +366,7 @@ static int select_next_proto_cb(SSL *ssl _U_, unsigned char **out,
   }
   return SSL_TLSEXT_ERR_OK;
 }
+#endif /* !OPENSSL_NO_NEXTPROTONEG */
 
 /*
  * Setup SSL/TLS context.
@@ -360,7 +377,9 @@ static void init_ssl_ctx(SSL_CTX *ssl_ctx) {
   SSL_CTX_set_mode(ssl_ctx, SSL_MODE_AUTO_RETRY);
   SSL_CTX_set_mode(ssl_ctx, SSL_MODE_RELEASE_BUFFERS);
   /* Set NPN callback */
+#ifndef OPENSSL_NO_NEXTPROTONEG
   SSL_CTX_set_next_proto_select_cb(ssl_ctx, select_next_proto_cb, NULL);
+#endif /* !OPENSSL_NO_NEXTPROTONEG */
 }
 
 static void ssl_handshake(SSL *ssl, int fd) {

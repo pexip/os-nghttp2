@@ -26,13 +26,13 @@
 
 #include <sys/stat.h>
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif // HAVE_UNISTD_H
 #ifdef HAVE_FCNTL_H
-#include <fcntl.h>
+#  include <fcntl.h>
 #endif // HAVE_FCNTL_H
 #ifdef HAVE_NETINET_IN_H
-#include <netinet/in.h>
+#  include <netinet/in.h>
 #endif // HAVE_NETINET_IN_H
 #include <netinet/tcp.h>
 #include <getopt.h>
@@ -50,18 +50,19 @@
 #include <openssl/err.h>
 
 #ifdef HAVE_JANSSON
-#include <jansson.h>
+#  include <jansson.h>
 #endif // HAVE_JANSSON
 
 #include "app_helper.h"
 #include "HtmlParser.h"
 #include "util.h"
 #include "base64.h"
-#include "ssl.h"
+#include "tls.h"
 #include "template.h"
+#include "ssl_compat.h"
 
 #ifndef O_BINARY
-#define O_BINARY (0)
+#  define O_BINARY (0)
 #endif // O_BINARY
 
 namespace nghttp2 {
@@ -89,7 +90,11 @@ enum {
 
 namespace {
 constexpr auto anchors = std::array<Anchor, 5>{{
-    {3, 0, 201}, {5, 0, 101}, {7, 0, 1}, {9, 7, 1}, {11, 3, 1},
+    {3, 0, 201},
+    {5, 0, 101},
+    {7, 0, 1},
+    {9, 7, 1},
+    {11, 3, 1},
 }};
 } // namespace
 
@@ -105,6 +110,7 @@ Config::Config()
       window_bits(-1),
       connection_window_bits(-1),
       verbose(0),
+      port_override(0),
       null_out(false),
       remote_name(false),
       get_assets(false),
@@ -115,11 +121,13 @@ Config::Config()
       no_dep(false),
       hexdump(false),
       no_push(false),
-      expect_continue(false) {
+      expect_continue(false),
+      verify_peer(true) {
   nghttp2_option_new(&http2_option);
   nghttp2_option_set_peer_max_concurrent_streams(http2_option,
                                                  peer_max_concurrent_streams);
   nghttp2_option_set_builtin_recv_extension_type(http2_option, NGHTTP2_ALTSVC);
+  nghttp2_option_set_builtin_recv_extension_type(http2_option, NGHTTP2_ORIGIN);
 }
 
 Config::~Config() { nghttp2_option_del(http2_option); }
@@ -156,7 +164,6 @@ Request::Request(const std::string &uri, const http_parser_url &u,
       data_offset(0),
       response_len(0),
       inflater(nullptr),
-      html_parser(nullptr),
       data_prd(data_prd),
       header_buffer_size(0),
       stream_id(-1),
@@ -167,18 +174,67 @@ Request::Request(const std::string &uri, const http_parser_url &u,
   http2::init_hdidx(req_hdidx);
 }
 
-Request::~Request() {
-  nghttp2_gzip_inflate_del(inflater);
-  delete html_parser;
-}
+Request::~Request() { nghttp2_gzip_inflate_del(inflater); }
 
 void Request::init_inflater() {
   int rv;
+  // This is required with --disable-assert.
+  (void)rv;
   rv = nghttp2_gzip_inflate_new(&inflater);
   assert(rv == 0);
 }
 
-void Request::init_html_parser() { html_parser = new HtmlParser(uri); }
+StringRef Request::get_real_scheme() const {
+  return config.scheme_override.empty()
+             ? util::get_uri_field(uri.c_str(), u, UF_SCHEMA)
+             : StringRef{config.scheme_override};
+}
+
+StringRef Request::get_real_host() const {
+  return config.host_override.empty()
+             ? util::get_uri_field(uri.c_str(), u, UF_HOST)
+             : StringRef{config.host_override};
+}
+
+uint16_t Request::get_real_port() const {
+  auto scheme = get_real_scheme();
+  return config.host_override.empty()
+             ? util::has_uri_field(u, UF_PORT) ? u.port
+                                               : scheme == "https" ? 443 : 80
+             : config.port_override == 0 ? scheme == "https" ? 443 : 80
+                                         : config.port_override;
+}
+
+void Request::init_html_parser() {
+  // We crawl HTML using overridden scheme, host, and port.
+  auto scheme = get_real_scheme();
+  auto host = get_real_host();
+  auto port = get_real_port();
+  auto ipv6_lit =
+      std::find(std::begin(host), std::end(host), ':') != std::end(host);
+
+  auto base_uri = scheme.str();
+  base_uri += "://";
+  if (ipv6_lit) {
+    base_uri += '[';
+  }
+  base_uri += host;
+  if (ipv6_lit) {
+    base_uri += ']';
+  }
+  if (!((scheme == "https" && port == 443) ||
+        (scheme == "http" && port == 80))) {
+    base_uri += ':';
+    base_uri += util::utos(port);
+  }
+  base_uri += util::get_uri_field(uri.c_str(), u, UF_PATH);
+  if (util::has_uri_field(u, UF_QUERY)) {
+    base_uri += '?';
+    base_uri += util::get_uri_field(uri.c_str(), u, UF_QUERY);
+  }
+
+  html_parser = std::make_unique<HtmlParser>(base_uri);
+}
 
 int Request::update_html_parser(const uint8_t *data, size_t len, int fin) {
   if (!html_parser) {
@@ -355,26 +411,19 @@ int htp_msg_begincb(http_parser *htp) {
 } // namespace
 
 namespace {
-int htp_statuscb(http_parser *htp, const char *at, size_t length) {
-  auto client = static_cast<HttpClient *>(htp->data);
-  client->upgrade_response_status_code = htp->status_code;
-  return 0;
-}
-} // namespace
-
-namespace {
 int htp_msg_completecb(http_parser *htp) {
   auto client = static_cast<HttpClient *>(htp->data);
+  client->upgrade_response_status_code = htp->status_code;
   client->upgrade_response_complete = true;
   return 0;
 }
 } // namespace
 
 namespace {
-http_parser_settings htp_hooks = {
+constexpr http_parser_settings htp_hooks = {
     htp_msg_begincb,   // http_cb      on_message_begin;
     nullptr,           // http_data_cb on_url;
-    htp_statuscb,      // http_data_cb on_status;
+    nullptr,           // http_data_cb on_status;
     nullptr,           // http_data_cb on_header_field;
     nullptr,           // http_data_cb on_header_value;
     nullptr,           // http_cb      on_headers_complete;
@@ -478,7 +527,7 @@ int submit_request(HttpClient *client, const Headers &headers, Request *req) {
   req->req_nva = std::move(build_headers);
 
   if (expect_continue) {
-    auto timer = make_unique<ContinueTimer>(client->loop, req);
+    auto timer = std::make_unique<ContinueTimer>(client->loop, req);
     req->continue_timer = std::move(timer);
   }
 
@@ -599,6 +648,11 @@ int HttpClient::resolve_host(const std::string &host, uint16_t port) {
   return 0;
 }
 
+namespace {
+// Just returns 1 to continue handshake.
+int verify_cb(int preverify_ok, X509_STORE_CTX *ctx) { return 1; }
+} // namespace
+
 int HttpClient::initiate_connection() {
   int rv;
 
@@ -625,20 +679,23 @@ int HttpClient::initiate_connection() {
 
       // If the user overrode the :authority or host header, use that
       // value for the SNI extension
-      const char *host_string = nullptr;
-      auto i =
-          std::find_if(std::begin(config.headers), std::end(config.headers),
-                       [](const Header &nv) {
-                         return ":authority" == nv.name || "host" == nv.name;
-                       });
-      if (i != std::end(config.headers)) {
-        host_string = (*i).value.c_str();
-      } else {
-        host_string = host.c_str();
-      }
+      const auto &host_string =
+          config.host_override.empty() ? host : config.host_override;
 
-      if (!util::numeric_host(host_string)) {
-        SSL_set_tlsext_host_name(ssl, host_string);
+#if LIBRESSL_2_7_API ||                                                        \
+    (!LIBRESSL_IN_USE && OPENSSL_VERSION_NUMBER >= 0x10002000L) ||             \
+    defined(OPENSSL_IS_BORINGSSL)
+      auto param = SSL_get0_param(ssl);
+      X509_VERIFY_PARAM_set_hostflags(param, 0);
+      X509_VERIFY_PARAM_set1_host(param, host_string.c_str(),
+                                  host_string.size());
+#endif // LIBRESSL_2_7_API || (!LIBRESSL_IN_USE &&
+       // OPENSSL_VERSION_NUMBER >= 0x10002000L) ||
+       // defined(OPENSSL_IS_BORINGSSL)
+      SSL_set_verify(ssl, SSL_VERIFY_PEER, verify_cb);
+
+      if (!util::numeric_host(host_string.c_str())) {
+        SSL_set_tlsext_host_name(ssl, host_string.c_str());
       }
     }
 
@@ -701,7 +758,7 @@ void HttpClient::disconnect() {
   session = nullptr;
 
   if (ssl) {
-    SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN);
+    SSL_set_shutdown(ssl, SSL_get_shutdown(ssl) | SSL_RECEIVED_SHUTDOWN);
     ERR_clear_error();
     SSL_shutdown(ssl);
     SSL_free(ssl);
@@ -828,7 +885,7 @@ int HttpClient::connected() {
   writefn = &HttpClient::write_clear;
 
   if (need_upgrade()) {
-    htp = make_unique<http_parser>();
+    htp = std::make_unique<http_parser>();
     http_parser_init(htp.get(), HTTP_RESPONSE);
     htp->data = this;
 
@@ -1041,7 +1098,9 @@ int HttpClient::connection_made() {
     // Check NPN or ALPN result
     const unsigned char *next_proto = nullptr;
     unsigned int next_proto_len;
+#ifndef OPENSSL_NO_NEXTPROTONEG
     SSL_get0_next_proto_negotiated(ssl, &next_proto, &next_proto_len);
+#endif // !OPENSSL_NO_NEXTPROTONEG
     for (int i = 0; i < 2; ++i) {
       if (next_proto) {
         auto proto = StringRef{next_proto, next_proto_len};
@@ -1257,6 +1316,14 @@ int HttpClient::tls_handshake() {
   readfn = &HttpClient::read_tls;
   writefn = &HttpClient::write_tls;
 
+  if (config.verify_peer) {
+    auto verify_res = SSL_get_verify_result(ssl);
+    if (verify_res != X509_V_OK) {
+      std::cerr << "[WARNING] Certificate verification failed: "
+                << X509_verify_cert_error_string(verify_res) << std::endl;
+    }
+  }
+
   if (connection_made() != 0) {
     return -1;
   }
@@ -1386,8 +1453,8 @@ bool HttpClient::add_request(const std::string &uri,
     path_cache.insert(uri);
   }
 
-  reqvec.push_back(
-      make_unique<Request>(uri, u, data_prd, data_length, pri_spec, level));
+  reqvec.push_back(std::make_unique<Request>(uri, u, data_prd, data_length,
+                                             pri_spec, level));
   return true;
 }
 
@@ -1591,22 +1658,36 @@ void update_html_parser(HttpClient *client, Request *req, const uint8_t *data,
   }
   req->update_html_parser(data, len, fin);
 
+  auto scheme = req->get_real_scheme();
+  auto host = req->get_real_host();
+  auto port = req->get_real_port();
+
   for (auto &p : req->html_parser->get_links()) {
     auto uri = strip_fragment(p.first.c_str());
     auto res_type = p.second;
 
     http_parser_url u{};
-    if (http_parser_parse_url(uri.c_str(), uri.size(), 0, &u) == 0 &&
-        util::fieldeq(uri.c_str(), u, req->uri.c_str(), req->u, UF_SCHEMA) &&
-        util::fieldeq(uri.c_str(), u, req->uri.c_str(), req->u, UF_HOST) &&
-        util::porteq(uri.c_str(), u, req->uri.c_str(), req->u)) {
-      // No POST data for assets
-      auto pri_spec = resolve_dep(res_type);
+    if (http_parser_parse_url(uri.c_str(), uri.size(), 0, &u) != 0) {
+      continue;
+    }
 
-      if (client->add_request(uri, nullptr, 0, pri_spec, req->level + 1)) {
+    if (!util::fieldeq(uri.c_str(), u, UF_SCHEMA, scheme) ||
+        !util::fieldeq(uri.c_str(), u, UF_HOST, host)) {
+      continue;
+    }
 
-        submit_request(client, config.headers, client->reqvec.back().get());
-      }
+    auto link_port =
+        util::has_uri_field(u, UF_PORT) ? u.port : scheme == "https" ? 443 : 80;
+
+    if (port != link_port) {
+      continue;
+    }
+
+    // No POST data for assets
+    auto pri_spec = resolve_dep(res_type);
+
+    if (client->add_request(uri, nullptr, 0, pri_spec, req->level + 1)) {
+      submit_request(client, config.headers, client->reqvec.back().get());
     }
   }
   req->html_parser->clear_links();
@@ -1773,7 +1854,7 @@ int on_begin_headers_callback(nghttp2_session *session,
 
     nghttp2_priority_spec_default_init(&pri_spec);
 
-    auto req = make_unique<Request>("", u, nullptr, 0, pri_spec);
+    auto req = std::make_unique<Request>("", u, nullptr, 0, pri_spec);
     req->stream_id = stream_id;
 
     nghttp2_session_set_stream_user_data(session, stream_id, req.get());
@@ -2144,6 +2225,7 @@ id  responseEnd requestStart  process code size request path)"
 }
 } // namespace
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
 namespace {
 int client_select_next_proto_cb(SSL *ssl, unsigned char **out,
                                 unsigned char *outlen, const unsigned char *in,
@@ -2167,24 +2249,7 @@ int client_select_next_proto_cb(SSL *ssl, unsigned char **out,
   return SSL_TLSEXT_ERR_OK;
 }
 } // namespace
-
-namespace {
-// Recommended general purpose "Intermediate compatibility" cipher by
-// mozilla.
-//
-// https://wiki.mozilla.org/Security/Server_Side_TLS
-const char *const CIPHER_LIST =
-    "ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-"
-    "AES256-GCM-SHA384:ECDHE-ECDSA-AES256-GCM-SHA384:DHE-RSA-AES128-GCM-SHA256:"
-    "DHE-DSS-AES128-GCM-SHA256:kEDH+AESGCM:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-"
-    "AES128-SHA256:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-"
-    "AES256-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-"
-    "AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:DHE-DSS-AES128-SHA256:"
-    "DHE-RSA-AES256-SHA256:DHE-DSS-AES256-SHA:DHE-RSA-AES256-SHA:AES128-GCM-"
-    "SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:AES256-"
-    "SHA:AES:CAMELLIA:DES-CBC3-SHA:!aNULL:!eNULL:!EXPORT:!DES:!RC4:!MD5:!PSK:!"
-    "aECDH:!EDH-DSS-DES-CBC3-SHA:!EDH-RSA-DES-CBC3-SHA:!KRB5-DES-CBC3-SHA";
-} // namespace
+#endif // !OPENSSL_NO_NEXTPROTONEG
 
 namespace {
 int communicate(
@@ -2212,7 +2277,21 @@ int communicate(
     SSL_CTX_set_options(ssl_ctx, ssl_opts);
     SSL_CTX_set_mode(ssl_ctx, SSL_MODE_AUTO_RETRY);
     SSL_CTX_set_mode(ssl_ctx, SSL_MODE_RELEASE_BUFFERS);
-    if (SSL_CTX_set_cipher_list(ssl_ctx, CIPHER_LIST) == 0) {
+
+    if (SSL_CTX_set_default_verify_paths(ssl_ctx) != 1) {
+      std::cerr << "[WARNING] Could not load system trusted CA certificates: "
+                << ERR_error_string(ERR_get_error(), nullptr) << std::endl;
+    }
+
+    if (nghttp2::tls::ssl_ctx_set_proto_versions(
+            ssl_ctx, nghttp2::tls::NGHTTP2_TLS_MIN_VERSION,
+            nghttp2::tls::NGHTTP2_TLS_MAX_VERSION) != 0) {
+      std::cerr << "[ERROR] Could not set TLS versions" << std::endl;
+      result = -1;
+      goto fin;
+    }
+
+    if (SSL_CTX_set_cipher_list(ssl_ctx, tls::DEFAULT_CIPHER_LIST) == 0) {
       std::cerr << "[ERROR] " << ERR_error_string(ERR_get_error(), nullptr)
                 << std::endl;
       result = -1;
@@ -2236,8 +2315,10 @@ int communicate(
         goto fin;
       }
     }
+#ifndef OPENSSL_NO_NEXTPROTONEG
     SSL_CTX_set_next_proto_select_cb(ssl_ctx, client_select_next_proto_cb,
                                      nullptr);
+#endif // !OPENSSL_NO_NEXTPROTONEG
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
     auto proto_list = util::get_default_alpn();
@@ -2390,8 +2471,8 @@ int run(char **uris, int n) {
     nghttp2_session_callbacks_set_on_invalid_frame_recv_callback(
         callbacks, verbose_on_invalid_frame_recv_callback);
 
-    nghttp2_session_callbacks_set_error_callback(callbacks,
-                                                 verbose_error_callback);
+    nghttp2_session_callbacks_set_error_callback2(callbacks,
+                                                  verbose_error_callback);
   }
 
   nghttp2_session_callbacks_set_on_data_chunk_recv_callback(
@@ -2658,6 +2739,9 @@ Options:
               (up to  a short  timeout)  until the server sends  a 100
               Continue interim response. This option is ignored unless
               combined with the -d option.
+  -y, --no-verify-peer
+              Suppress  warning  on  server  certificate  verification
+              failure.
   --version   Display version information and exit.
   -h, --help  Display this help and exit.
 
@@ -2675,12 +2759,12 @@ Options:
 } // namespace
 
 int main(int argc, char **argv) {
-  ssl::libssl_init();
+  tls::libssl_init();
 
   bool color = false;
   while (1) {
     static int flag = 0;
-    static option long_options[] = {
+    constexpr static option long_options[] = {
         {"verbose", no_argument, nullptr, 'v'},
         {"null-out", no_argument, nullptr, 'n'},
         {"remote-name", no_argument, nullptr, 'O'},
@@ -2699,6 +2783,7 @@ int main(int argc, char **argv) {
         {"header-table-size", required_argument, nullptr, 'c'},
         {"padding", required_argument, nullptr, 'b'},
         {"har", required_argument, nullptr, 'r'},
+        {"no-verify-peer", no_argument, nullptr, 'y'},
         {"cert", required_argument, &flag, 1},
         {"key", required_argument, &flag, 2},
         {"color", no_argument, &flag, 3},
@@ -2714,8 +2799,9 @@ int main(int argc, char **argv) {
         {"encoder-header-table-size", required_argument, &flag, 14},
         {nullptr, 0, nullptr, 0}};
     int option_index = 0;
-    int c = getopt_long(argc, argv, "M:Oab:c:d:gm:np:r:hH:vst:uw:W:",
-                        long_options, &option_index);
+    int c =
+        getopt_long(argc, argv, "M:Oab:c:d:m:np:r:hH:vst:uw:yW:", long_options,
+                    &option_index);
     if (c == -1) {
       break;
     }
@@ -2845,6 +2931,9 @@ int main(int argc, char **argv) {
       config.min_header_table_size = std::min(config.min_header_table_size, n);
       break;
     }
+    case 'y':
+      config.verify_peer = false;
+      break;
     case '?':
       util::show_candidates(argv[optind - 1], long_options);
       exit(EXIT_FAILURE);
@@ -2949,6 +3038,41 @@ int main(int argc, char **argv) {
     weight_to_fill = config.weight.back();
   }
   config.weight.insert(std::end(config.weight), argc - optind, weight_to_fill);
+
+  // Find scheme overridden by extra header fields.
+  auto scheme_it =
+      std::find_if(std::begin(config.headers), std::end(config.headers),
+                   [](const Header &nv) { return nv.name == ":scheme"; });
+  if (scheme_it != std::end(config.headers)) {
+    config.scheme_override = (*scheme_it).value;
+  }
+
+  // Find host and port overridden by extra header fields.
+  auto authority_it =
+      std::find_if(std::begin(config.headers), std::end(config.headers),
+                   [](const Header &nv) { return nv.name == ":authority"; });
+  if (authority_it == std::end(config.headers)) {
+    authority_it =
+        std::find_if(std::begin(config.headers), std::end(config.headers),
+                     [](const Header &nv) { return nv.name == "host"; });
+  }
+
+  if (authority_it != std::end(config.headers)) {
+    // authority_it may looks like "host:port".
+    auto uri = "https://" + (*authority_it).value;
+    http_parser_url u{};
+    if (http_parser_parse_url(uri.c_str(), uri.size(), 0, &u) != 0) {
+      std::cerr << "[ERROR] Could not parse authority in "
+                << (*authority_it).name << ": " << (*authority_it).value
+                << std::endl;
+      exit(EXIT_FAILURE);
+    }
+
+    config.host_override = util::get_uri_field(uri.c_str(), u, UF_HOST).str();
+    if (util::has_uri_field(u, UF_PORT)) {
+      config.port_override = u.port;
+    }
+  }
 
   set_color_output(color || isatty(fileno(stdout)));
 

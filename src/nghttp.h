@@ -29,10 +29,10 @@
 
 #include <sys/types.h>
 #ifdef HAVE_SYS_SOCKET_H
-#include <sys/socket.h>
+#  include <sys/socket.h>
 #endif // HAVE_SYS_SOCKET_H
 #ifdef HAVE_NETDB_H
-#include <netdb.h>
+#  include <netdb.h>
 #endif // HAVE_NETDB_H
 
 #include <string>
@@ -69,6 +69,8 @@ struct Config {
   std::string keyfile;
   std::string datafile;
   std::string harfile;
+  std::string scheme_override;
+  std::string host_override;
   nghttp2_option *http2_option;
   int64_t header_table_size;
   int64_t min_header_table_size;
@@ -82,6 +84,7 @@ struct Config {
   int window_bits;
   int connection_window_bits;
   int verbose;
+  uint16_t port_override;
   bool null_out;
   bool remote_name;
   bool get_assets;
@@ -93,6 +96,7 @@ struct Config {
   bool hexdump;
   bool no_push;
   bool expect_continue;
+  bool verify_peer;
 };
 
 enum class RequestState { INITIAL, ON_REQUEST, ON_RESPONSE, ON_COMPLETE };
@@ -151,6 +155,15 @@ struct Request {
   void record_response_start_time();
   void record_response_end_time();
 
+  // Returns scheme taking into account overridden scheme.
+  StringRef get_real_scheme() const;
+  // Returns request host, without port, taking into account
+  // overridden host.
+  StringRef get_real_host() const;
+  // Returns request port, taking into account overridden host, port,
+  // and scheme.
+  uint16_t get_real_port() const;
+
   Headers res_nva;
   Headers req_nva;
   std::string method;
@@ -164,7 +177,7 @@ struct Request {
   // Number of bytes received from server
   int64_t response_len;
   nghttp2_gzip *inflater;
-  HtmlParser *html_parser;
+  std::unique_ptr<HtmlParser> html_parser;
   const nghttp2_data_provider *data_prd;
   size_t header_buffer_size;
   int32_t stream_id;

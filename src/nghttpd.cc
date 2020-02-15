@@ -25,11 +25,11 @@
 #include "nghttp2_config.h"
 
 #ifdef __sgi
-#define daemon _daemonize
+#  define daemon _daemonize
 #endif
 
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif // HAVE_UNISTD_H
 #include <signal.h>
 #include <getopt.h>
@@ -48,7 +48,7 @@
 #include "app_helper.h"
 #include "HttpServer.h"
 #include "util.h"
-#include "ssl.h"
+#include "tls.h"
 
 namespace nghttp2 {
 
@@ -190,10 +190,10 @@ Options:
 } // namespace
 
 int main(int argc, char **argv) {
-  ssl::libssl_init();
+  tls::libssl_init();
 
 #ifndef NOTHREADS
-  ssl::LibsslGlobalLock lock;
+  tls::LibsslGlobalLock lock;
 #endif // NOTHREADS
 
   Config config;
@@ -202,7 +202,7 @@ int main(int argc, char **argv) {
 
   while (1) {
     static int flag = 0;
-    static option long_options[] = {
+    constexpr static option long_options[] = {
         {"address", required_argument, nullptr, 'a'},
         {"daemon", no_argument, nullptr, 'D'},
         {"htdocs", required_argument, nullptr, 'd'},

@@ -25,25 +25,30 @@
 #include "util.h"
 
 #ifdef HAVE_TIME_H
-#include <time.h>
+#  include <time.h>
 #endif // HAVE_TIME_H
 #include <sys/types.h>
 #ifdef HAVE_SYS_SOCKET_H
-#include <sys/socket.h>
+#  include <sys/socket.h>
 #endif // HAVE_SYS_SOCKET_H
 #ifdef HAVE_NETDB_H
-#include <netdb.h>
+#  include <netdb.h>
 #endif // HAVE_NETDB_H
 #include <sys/stat.h>
 #ifdef HAVE_FCNTL_H
-#include <fcntl.h>
+#  include <fcntl.h>
 #endif // HAVE_FCNTL_H
 #ifdef HAVE_NETINET_IN_H
-#include <netinet/in.h>
+#  include <netinet/in.h>
 #endif // HAVE_NETINET_IN_H
-#include <netinet/tcp.h>
+#ifdef _WIN32
+#  include <ws2tcpip.h>
+#  include <boost/date_time/posix_time/posix_time.hpp>
+#else // !_WIN32
+#  include <netinet/tcp.h>
+#endif // !_WIN32
 #ifdef HAVE_ARPA_INET_H
-#include <arpa/inet.h>
+#  include <arpa/inet.h>
 #endif // HAVE_ARPA_INET_H
 
 #include <cmath>
@@ -64,6 +69,34 @@
 namespace nghttp2 {
 
 namespace util {
+
+#ifndef _WIN32
+namespace {
+int nghttp2_inet_pton(int af, const char *src, void *dst) {
+  return inet_pton(af, src, dst);
+}
+} // namespace
+#else // _WIN32
+namespace {
+// inet_pton-wrapper for Windows
+int nghttp2_inet_pton(int af, const char *src, void *dst) {
+#  if _WIN32_WINNT >= 0x0600
+  return InetPtonA(af, src, dst);
+#  else
+  // the function takes a 'char*', so we need to make a copy
+  char addr[INET6_ADDRSTRLEN + 1];
+  strncpy(addr, src, sizeof(addr));
+  addr[sizeof(addr) - 1] = 0;
+
+  int size = sizeof(struct in6_addr);
+
+  if (WSAStringToAddress(addr, af, NULL, (LPSOCKADDR)dst, &size) == 0)
+    return 1;
+  return 0;
+#  endif
+}
+} // namespace
+#endif // _WIN32
 
 const char UPPER_XDIGITS[] = "0123456789ABCDEF";
 
@@ -164,7 +197,7 @@ uint32_t hex_to_uint(char c) {
   if (c <= 'z') {
     return c - 'a' + 10;
   }
-  return c;
+  return 256;
 }
 
 StringRef quote_string(BlockAllocator &balloc, const StringRef &target) {
@@ -205,9 +238,10 @@ Iterator cpydig(Iterator d, uint32_t n, size_t len) {
 } // namespace
 
 namespace {
-const char *MONTH[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                       "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
-const char *DAY_OF_WEEK[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+constexpr const char *MONTH[] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                                 "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"};
+constexpr const char *DAY_OF_WEEK[] = {"Sun", "Mon", "Tue", "Wed",
+                                       "Thu", "Fri", "Sat"};
 } // namespace
 
 std::string http_date(time_t t) {
@@ -351,10 +385,40 @@ char *iso8601_date(char *res, int64_t ms) {
   return p;
 }
 
+#ifdef _WIN32
+namespace bt = boost::posix_time;
+// one-time definition of the locale that is used to parse UTC strings
+// (note that the time_input_facet is ref-counted and deleted automatically)
+static const std::locale
+    ptime_locale(std::locale::classic(),
+                 new bt::time_input_facet("%a, %d %b %Y %H:%M:%S GMT"));
+#endif //_WIN32
+
 time_t parse_http_date(const StringRef &s) {
+#ifdef _WIN32
+  // there is no strptime - use boost
+  std::stringstream sstr(s.str());
+  sstr.imbue(ptime_locale);
+  bt::ptime ltime;
+  sstr >> ltime;
+  if (!sstr)
+    return 0;
+
+  return boost::posix_time::to_time_t(ltime);
+#else  // !_WIN32
   tm tm{};
   char *r = strptime(s.c_str(), "%a, %d %b %Y %H:%M:%S GMT", &tm);
   if (r == 0) {
+    return 0;
+  }
+  return nghttp2_timegm_without_yday(&tm);
+#endif // !_WIN32
+}
+
+time_t parse_openssl_asn1_time_print(const StringRef &s) {
+  tm tm{};
+  auto r = strptime(s.c_str(), "%b %d %H:%M:%S %Y GMT", &tm);
+  if (r == nullptr) {
     return 0;
   }
   return nghttp2_timegm_without_yday(&tm);
@@ -367,10 +431,6 @@ char upcase(char c) {
     return c;
   }
 }
-
-namespace {
-const char LOWER_XDIGITS[] = "0123456789abcdef";
-} // namespace
 
 std::string format_hex(const unsigned char *s, size_t len) {
   std::string res;
@@ -472,7 +532,7 @@ int levenshtein(const char *a, int alen, const char *b, int blen, int swapcost,
 }
 } // namespace
 
-void show_candidates(const char *unkopt, option *options) {
+void show_candidates(const char *unkopt, const option *options) {
   for (; *unkopt == '-'; ++unkopt)
     ;
   if (*unkopt == '\0') {
@@ -554,20 +614,16 @@ bool fieldeq(const char *uri1, const http_parser_url &u1, const char *uri2,
 
 bool fieldeq(const char *uri, const http_parser_url &u,
              http_parser_url_fields field, const char *t) {
+  return fieldeq(uri, u, field, StringRef{t});
+}
+
+bool fieldeq(const char *uri, const http_parser_url &u,
+             http_parser_url_fields field, const StringRef &t) {
   if (!has_uri_field(u, field)) {
-    if (!t[0]) {
-      return true;
-    } else {
-      return false;
-    }
-  } else if (!t[0]) {
-    return false;
+    return t.empty();
   }
-  int i, len = u.field_data[field].len;
-  const char *p = uri + u.field_data[field].off;
-  for (i = 0; i < len && t[i] && p[i] == t[i]; ++i)
-    ;
-  return i == len && !t[i];
+  auto &f = u.field_data[field];
+  return StringRef{uri + f.off, f.len} == t;
 }
 
 StringRef get_uri_field(const char *uri, const http_parser_url &u,
@@ -614,7 +670,7 @@ bool numeric_host(const char *hostname, int family) {
   int rv;
   std::array<uint8_t, sizeof(struct in6_addr)> dst;
 
-  rv = inet_pton(family, hostname, dst.data());
+  rv = nghttp2_inet_pton(family, hostname, dst.data());
 
   return rv == 1;
 }
@@ -631,9 +687,11 @@ std::string numeric_name(const struct sockaddr *sa, socklen_t salen) {
 
 std::string to_numeric_addr(const Address *addr) {
   auto family = addr->su.storage.ss_family;
+#ifndef _WIN32
   if (family == AF_UNIX) {
     return addr->su.un.sun_path;
   }
+#endif // !_WIN32
 
   std::array<char, NI_MAXHOST> host;
   std::array<char, NI_MAXSERV> serv;
@@ -675,60 +733,6 @@ void set_port(Address &addr, uint16_t port) {
     addr.su.in6.sin6_port = htons(port);
     break;
   }
-}
-
-static int STDERR_COPY = -1;
-static int STDOUT_COPY = -1;
-
-void store_original_fds() {
-  // consider dup'ing stdout too
-  STDERR_COPY = dup(STDERR_FILENO);
-  STDOUT_COPY = STDOUT_FILENO;
-  // no race here, since it is called early
-  make_socket_closeonexec(STDERR_COPY);
-}
-
-void restore_original_fds() { dup2(STDERR_COPY, STDERR_FILENO); }
-
-void close_log_file(int &fd) {
-  if (fd != STDERR_COPY && fd != STDOUT_COPY && fd != -1) {
-    close(fd);
-  }
-  fd = -1;
-}
-
-int open_log_file(const char *path) {
-
-  if (strcmp(path, "/dev/stdout") == 0 ||
-      strcmp(path, "/proc/self/fd/1") == 0) {
-    return STDOUT_COPY;
-  }
-
-  if (strcmp(path, "/dev/stderr") == 0 ||
-      strcmp(path, "/proc/self/fd/2") == 0) {
-    return STDERR_COPY;
-  }
-#if defined O_CLOEXEC
-
-  auto fd = open(path, O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC,
-                 S_IRUSR | S_IWUSR | S_IRGRP);
-#else // !O_CLOEXEC
-
-  auto fd =
-      open(path, O_WRONLY | O_APPEND | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP);
-
-  // We get race condition if execve is called at the same time.
-  if (fd != -1) {
-    make_socket_closeonexec(fd);
-  }
-
-#endif // !O_CLOEXEC
-
-  if (fd == -1) {
-    return -1;
-  }
-
-  return fd;
 }
 
 std::string ascii_dump(const uint8_t *data, size_t len) {
@@ -875,6 +879,10 @@ std::vector<std::string> parse_config_str_list(const StringRef &s, char delim) {
 }
 
 int make_socket_closeonexec(int fd) {
+#ifdef _WIN32
+  (void)fd;
+  return 0;
+#else  // !_WIN32
   int flags;
   int rv;
   while ((flags = fcntl(fd, F_GETFD)) == -1 && errno == EINTR)
@@ -882,15 +890,24 @@ int make_socket_closeonexec(int fd) {
   while ((rv = fcntl(fd, F_SETFD, flags | FD_CLOEXEC)) == -1 && errno == EINTR)
     ;
   return rv;
+#endif // !_WIN32
 }
 
 int make_socket_nonblocking(int fd) {
-  int flags;
   int rv;
+
+#ifdef _WIN32
+  u_long mode = 1;
+
+  rv = ioctlsocket(fd, FIONBIO, &mode);
+#else  // !_WIN32
+  int flags;
   while ((flags = fcntl(fd, F_GETFL, 0)) == -1 && errno == EINTR)
     ;
   while ((rv = fcntl(fd, F_SETFL, flags | O_NONBLOCK)) == -1 && errno == EINTR)
     ;
+#endif // !_WIN32
+
   return rv;
 }
 
@@ -931,7 +948,7 @@ int create_nonblock_socket(int family) {
 bool check_socket_connected(int fd) {
   int error;
   socklen_t len = sizeof(error);
-  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) != 0) {
+  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&error, &len) != 0) {
     return false;
   }
 
@@ -941,7 +958,7 @@ bool check_socket_connected(int fd) {
 int get_socket_error(int fd) {
   int error;
   socklen_t len = sizeof(error);
-  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &len) != 0) {
+  if (getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&error, &len) != 0) {
     return -1;
   }
 
@@ -950,7 +967,7 @@ int get_socket_error(int fd) {
 
 bool ipv6_numeric_addr(const char *host) {
   uint8_t dst[16];
-  return inet_pton(AF_INET6, host, dst) == 1;
+  return nghttp2_inet_pton(AF_INET6, host, dst) == 1;
 }
 
 namespace {
@@ -1160,8 +1177,9 @@ std::string format_duration(double t) {
 }
 
 std::string dtos(double n) {
-  auto f = utos(static_cast<int64_t>(round(100. * n)) % 100);
-  return utos(static_cast<int64_t>(n)) + "." + (f.size() == 1 ? "0" : "") + f;
+  auto m = llround(100. * n);
+  auto f = utos(m % 100);
+  return utos(m / 100) + "." + (f.size() == 1 ? "0" : "") + f;
 }
 
 StringRef make_http_hostport(BlockAllocator &balloc, const StringRef &host,
@@ -1435,7 +1453,8 @@ void EVP_MD_CTX_free(EVP_MD_CTX *ctx) { EVP_MD_CTX_destroy(ctx); }
 } // namespace
 #endif // !OPENSSL_1_1_API
 
-int sha256(uint8_t *res, const StringRef &s) {
+namespace {
+int message_digest(uint8_t *res, const EVP_MD *meth, const StringRef &s) {
   int rv;
 
   auto ctx = EVP_MD_CTX_new();
@@ -1445,7 +1464,7 @@ int sha256(uint8_t *res, const StringRef &s) {
 
   auto ctx_deleter = defer(EVP_MD_CTX_free, ctx);
 
-  rv = EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+  rv = EVP_DigestInit_ex(ctx, meth, nullptr);
   if (rv != 1) {
     return -1;
   }
@@ -1455,7 +1474,7 @@ int sha256(uint8_t *res, const StringRef &s) {
     return -1;
   }
 
-  unsigned int mdlen = 32;
+  unsigned int mdlen = EVP_MD_size(meth);
 
   rv = EVP_DigestFinal_ex(ctx, res, &mdlen);
   if (rv != 1) {
@@ -1463,6 +1482,64 @@ int sha256(uint8_t *res, const StringRef &s) {
   }
 
   return 0;
+}
+} // namespace
+
+int sha256(uint8_t *res, const StringRef &s) {
+  return message_digest(res, EVP_sha256(), s);
+}
+
+int sha1(uint8_t *res, const StringRef &s) {
+  return message_digest(res, EVP_sha1(), s);
+}
+
+bool is_hex_string(const StringRef &s) {
+  if (s.size() % 2) {
+    return false;
+  }
+
+  for (auto c : s) {
+    if (!is_hex_digit(c)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+StringRef decode_hex(BlockAllocator &balloc, const StringRef &s) {
+  auto iov = make_byte_ref(balloc, s.size() + 1);
+  auto p = iov.base;
+  for (auto it = std::begin(s); it != std::end(s); it += 2) {
+    *p++ = (hex_to_uint(*it) << 4) | hex_to_uint(*(it + 1));
+  }
+  *p = '\0';
+  return StringRef{iov.base, p};
+}
+
+StringRef extract_host(const StringRef &hostport) {
+  if (hostport[0] == '[') {
+    // assume this is IPv6 numeric address
+    auto p = std::find(std::begin(hostport), std::end(hostport), ']');
+    if (p == std::end(hostport)) {
+      return StringRef{};
+    }
+    if (p + 1 < std::end(hostport) && *(p + 1) != ':') {
+      return StringRef{};
+    }
+    return StringRef{std::begin(hostport), p + 1};
+  }
+
+  auto p = std::find(std::begin(hostport), std::end(hostport), ':');
+  if (p == std::begin(hostport)) {
+    return StringRef{};
+  }
+  return StringRef{std::begin(hostport), p};
+}
+
+std::mt19937 make_mt19937() {
+  std::random_device rd;
+  return std::mt19937(rd());
 }
 
 } // namespace util

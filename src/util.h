@@ -28,11 +28,11 @@
 #include "nghttp2_config.h"
 
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif // HAVE_UNISTD_H
 #include <getopt.h>
 #ifdef HAVE_NETDB_H
-#include <netdb.h>
+#  include <netdb.h>
 #endif // HAVE_NETDB_H
 
 #include <cmath>
@@ -70,6 +70,8 @@ constexpr auto NGHTTP2_H2_14 = StringRef::from_lit("h2-14");
 constexpr auto NGHTTP2_H1_1_ALPN = StringRef::from_lit("\x8http/1.1");
 constexpr auto NGHTTP2_H1_1 = StringRef::from_lit("http/1.1");
 
+constexpr size_t NGHTTP2_MAX_UINT64_DIGITS = str_size("18446744073709551615");
+
 namespace util {
 
 inline bool is_alpha(const char c) {
@@ -82,6 +84,9 @@ inline bool is_hex_digit(const char c) {
   return is_digit(c) || ('A' <= c && c <= 'F') || ('a' <= c && c <= 'f');
 }
 
+// Returns true if |s| is hex string.
+bool is_hex_string(const StringRef &s);
+
 bool in_rfc3986_unreserved_chars(const char c);
 
 bool in_rfc3986_sub_delims(const char c);
@@ -91,8 +96,8 @@ bool in_token(char c);
 
 bool in_attr_char(char c);
 
-// Returns integer corresponding to hex notation |c|.  It is undefined
-// if is_hex_digit(c) is false.
+// Returns integer corresponding to hex notation |c|.  If
+// is_hex_digit(c) is false, it returns 256.
 uint32_t hex_to_uint(char c);
 
 std::string percent_encode(const unsigned char *target, size_t len);
@@ -147,6 +152,24 @@ template <size_t N> std::string format_hex(const std::array<uint8_t, N> &s) {
 
 StringRef format_hex(BlockAllocator &balloc, const StringRef &s);
 
+static constexpr char LOWER_XDIGITS[] = "0123456789abcdef";
+
+template <typename OutputIt>
+OutputIt format_hex(OutputIt it, const StringRef &s) {
+  for (auto cc : s) {
+    uint8_t c = cc;
+    *it++ = LOWER_XDIGITS[c >> 4];
+    *it++ = LOWER_XDIGITS[c & 0xf];
+  }
+
+  return it;
+}
+
+// decode_hex decodes hex string |s|, returns the decoded byte string.
+// This function assumes |s| is hex string, that is is_hex_string(s)
+// == true.
+StringRef decode_hex(BlockAllocator &balloc, const StringRef &s);
+
 // Returns given time |t| from epoch in HTTP Date format (e.g., Mon,
 // 10 Oct 2016 10:25:58 GMT).
 std::string http_date(time_t t);
@@ -173,10 +196,15 @@ char *iso8601_date(char *res, int64_t ms);
 
 time_t parse_http_date(const StringRef &s);
 
+// Parses time formatted as "MMM DD HH:MM:SS YYYY [GMT]" (e.g., Feb 3
+// 00:55:52 2015 GMT), which is specifically used by OpenSSL
+// ASN1_TIME_print().
+time_t parse_openssl_asn1_time_print(const StringRef &s);
+
 char upcase(char c);
 
 inline char lowcase(char c) {
-  static unsigned char tbl[] = {
+  constexpr static unsigned char tbl[] = {
       0,   1,   2,   3,   4,   5,   6,   7,   8,   9,   10,  11,  12,  13,  14,
       15,  16,  17,  18,  19,  20,  21,  22,  23,  24,  25,  26,  27,  28,  29,
       30,  31,  32,  33,  34,  35,  36,  37,  38,  39,  40,  41,  42,  43,  44,
@@ -342,14 +370,12 @@ template <typename T> std::string utos(T n) {
     res = "0";
     return res;
   }
-  int i = 0;
-  T t = n;
-  for (; t; t /= 10, ++i)
+  size_t nlen = 0;
+  for (auto t = n; t; t /= 10, ++nlen)
     ;
-  res.resize(i);
-  --i;
-  for (; n; --i, n /= 10) {
-    res[i] = (n % 10) + '0';
+  res.resize(nlen);
+  for (; n; n /= 10) {
+    res[--nlen] = (n % 10) + '0';
   }
   return res;
 }
@@ -359,22 +385,20 @@ template <typename T, typename OutputIt> OutputIt utos(OutputIt dst, T n) {
     *dst++ = '0';
     return dst;
   }
-  int i = 0;
-  T t = n;
-  for (; t; t /= 10, ++i)
+  size_t nlen = 0;
+  for (auto t = n; t; t /= 10, ++nlen)
     ;
-  --i;
-  auto p = dst + i;
-  auto res = p + 1;
-  for (; n; --i, n /= 10) {
-    *p-- = (n % 10) + '0';
+  auto p = dst + nlen;
+  auto res = p;
+  for (; n; n /= 10) {
+    *--p = (n % 10) + '0';
   }
   return res;
 }
 
 template <typename T>
 StringRef make_string_ref_uint(BlockAllocator &balloc, T n) {
-  auto iov = make_byte_ref(balloc, str_size("18446744073709551615") + 1);
+  auto iov = make_byte_ref(balloc, NGHTTP2_MAX_UINT64_DIGITS + 1);
   auto p = iov.base;
   p = util::utos(p, n);
   *p = '\0';
@@ -443,7 +467,7 @@ void to_token68(std::string &base64str);
 
 StringRef to_base64(BlockAllocator &balloc, const StringRef &token68str);
 
-void show_candidates(const char *unkopt, option *options);
+void show_candidates(const char *unkopt, const option *options);
 
 bool has_uri_field(const http_parser_url &u, http_parser_url_fields field);
 
@@ -452,6 +476,9 @@ bool fieldeq(const char *uri1, const http_parser_url &u1, const char *uri2,
 
 bool fieldeq(const char *uri, const http_parser_url &u,
              http_parser_url_fields field, const char *t);
+
+bool fieldeq(const char *uri, const http_parser_url &u,
+             http_parser_url_fields field, const StringRef &t);
 
 StringRef get_uri_field(const char *uri, const http_parser_url &u,
                         http_parser_url_fields field);
@@ -480,24 +507,6 @@ std::string to_numeric_addr(const Address *addr);
 
 // Sets |port| to |addr|.
 void set_port(Address &addr, uint16_t port);
-
-// Makes internal copy of stderr (and possibly stdout in the future),
-// which is then used as pointer to /dev/stderr or /proc/self/fd/2
-void store_original_fds();
-
-// Restores the original stderr that was stored with copy_original_fds
-// Used just before execv
-void restore_original_fds();
-
-// Closes |fd| which was returned by open_log_file (see below)
-// and sets it to -1. In the case that |fd| points to stdout or
-// stderr, or is -1, the descriptor is not closed (but still set to -1).
-void close_log_file(int &fd);
-
-// Opens |path| with O_APPEND enabled.  If file does not exist, it is
-// created first.  This function returns file descriptor referring the
-// opened file if it succeeds, or -1.
-int open_log_file(const char *path);
 
 // Returns ASCII dump of |data| of length |len|.  Only ASCII printable
 // characters are preserved.  Other characters are replaced with ".".
@@ -721,13 +730,20 @@ template <typename OutputIt, typename Generator>
 OutputIt random_alpha_digit(OutputIt first, OutputIt last, Generator &gen) {
   // If we use uint8_t instead char, gcc 6.2.0 complains by shouting
   // char-array initialized from wide string.
-  constexpr char s[] =
+  static constexpr char s[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   std::uniform_int_distribution<> dis(0, 26 * 2 + 10 - 1);
   for (; first != last; ++first) {
     *first = s[dis(gen)];
   }
   return first;
+}
+
+// Fills random bytes to the range [|first|, |last|).
+template <typename OutputIt, typename Generator>
+void random_bytes(OutputIt first, OutputIt last, Generator &gen) {
+  std::uniform_int_distribution<> dis(0, 255);
+  std::generate(first, last, [&dis, &gen]() { return dis(gen); });
 }
 
 template <typename OutputIterator, typename CharT, size_t N>
@@ -743,6 +759,18 @@ uint32_t hash32(const StringRef &s);
 // Computes SHA-256 of |s|, and stores it in |buf|.  This function
 // returns 0 if it succeeds, or -1.
 int sha256(uint8_t *buf, const StringRef &s);
+
+// Computes SHA-1 of |s|, and stores it in |buf|.  This function
+// returns 0 if it succeeds, or -1.
+int sha1(uint8_t *buf, const StringRef &s);
+
+// Returns host from |hostport|.  If host cannot be found in
+// |hostport|, returns empty string.  The returned string might not be
+// NULL-terminated.
+StringRef extract_host(const StringRef &hostport);
+
+// Returns new std::mt19937 object.
+std::mt19937 make_mt19937();
 
 } // namespace util
 

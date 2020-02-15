@@ -28,19 +28,21 @@
 
 #include <boost/asio/ssl.hpp>
 
-#include "ssl.h"
+#include "tls.h"
 #include "util.h"
 
 namespace nghttp2 {
 namespace asio_http2 {
 namespace server {
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
 namespace {
 std::vector<unsigned char> &get_alpn_token() {
   static auto alpn_token = util::get_default_alpn();
   return alpn_token;
 }
 } // namespace
+#endif // !OPENSSL_NO_NEXTPROTONEG
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
 namespace {
@@ -72,7 +74,7 @@ configure_tls_context_easy(boost::system::error_code &ec,
   SSL_CTX_set_mode(ctx, SSL_MODE_AUTO_RETRY);
   SSL_CTX_set_mode(ctx, SSL_MODE_RELEASE_BUFFERS);
 
-  SSL_CTX_set_cipher_list(ctx, ssl::DEFAULT_CIPHER_LIST);
+  SSL_CTX_set_cipher_list(ctx, tls::DEFAULT_CIPHER_LIST);
 
 #ifndef OPENSSL_NO_EC
   auto ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
@@ -82,6 +84,7 @@ configure_tls_context_easy(boost::system::error_code &ec,
   }
 #endif /* OPENSSL_NO_EC */
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
   SSL_CTX_set_next_protos_advertised_cb(
       ctx,
       [](SSL *s, const unsigned char **data, unsigned int *len, void *arg) {
@@ -93,6 +96,7 @@ configure_tls_context_easy(boost::system::error_code &ec,
         return SSL_TLSEXT_ERR_OK;
       },
       nullptr);
+#endif // !OPENSSL_NO_NEXTPROTONEG
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
   // ALPN selection callback

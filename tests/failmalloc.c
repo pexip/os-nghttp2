@@ -23,7 +23,7 @@
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
 #ifdef HAVE_CONFIG_H
-#include <config.h>
+#  include <config.h>
 #endif /* HAVE_CONFIG_H */
 
 #include <stdio.h>
@@ -37,19 +37,19 @@ static int init_suite1(void) { return 0; }
 
 static int clean_suite1(void) { return 0; }
 
-int main(int argc _U_, char *argv[] _U_) {
+int main() {
   CU_pSuite pSuite = NULL;
   unsigned int num_tests_failed;
 
   /* initialize the CUnit test registry */
   if (CUE_SUCCESS != CU_initialize_registry())
-    return CU_get_error();
+    return (int)CU_get_error();
 
   /* add a suite to the registry */
   pSuite = CU_add_suite("libnghttp2_TestSuite", init_suite1, clean_suite1);
   if (NULL == pSuite) {
     CU_cleanup_registry();
-    return CU_get_error();
+    return (int)CU_get_error();
   }
 
   /* add the tests to the suite */
@@ -62,7 +62,7 @@ int main(int argc _U_, char *argv[] _U_) {
       !CU_add_test(pSuite, "failmalloc_frame", test_nghttp2_frame) ||
       !CU_add_test(pSuite, "failmalloc_hd", test_nghttp2_hd)) {
     CU_cleanup_registry();
-    return CU_get_error();
+    return (int)CU_get_error();
   }
 
   /* Run all tests using the CUnit Basic interface */
@@ -74,6 +74,6 @@ int main(int argc _U_, char *argv[] _U_) {
     return (int)num_tests_failed;
   } else {
     printf("CUnit Error: %s\n", CU_get_error_msg());
-    return CU_get_error();
+    return (int)CU_get_error();
   }
 }

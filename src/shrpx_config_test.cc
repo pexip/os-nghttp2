@@ -25,7 +25,7 @@
 #include "shrpx_config_test.h"
 
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif // HAVE_UNISTD_H
 
 #include <cstdlib>
@@ -33,6 +33,7 @@
 #include <CUnit/CUnit.h>
 
 #include "shrpx_config.h"
+#include "shrpx_log.h"
 
 namespace shrpx {
 
@@ -78,98 +79,98 @@ void test_shrpx_config_parse_log_format(void) {
                   R"("${http_referer}" $http_host "$http_user_agent")"));
   CU_ASSERT(16 == res.size());
 
-  CU_ASSERT(SHRPX_LOGF_REMOTE_ADDR == res[0].type);
+  CU_ASSERT(LogFragmentType::REMOTE_ADDR == res[0].type);
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[1].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[1].type);
   CU_ASSERT(" - $remote_user [" == res[1].value);
 
-  CU_ASSERT(SHRPX_LOGF_TIME_LOCAL == res[2].type);
+  CU_ASSERT(LogFragmentType::TIME_LOCAL == res[2].type);
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[3].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[3].type);
   CU_ASSERT("] \"" == res[3].value);
 
-  CU_ASSERT(SHRPX_LOGF_REQUEST == res[4].type);
+  CU_ASSERT(LogFragmentType::REQUEST == res[4].type);
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[5].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[5].type);
   CU_ASSERT("\" " == res[5].value);
 
-  CU_ASSERT(SHRPX_LOGF_STATUS == res[6].type);
+  CU_ASSERT(LogFragmentType::STATUS == res[6].type);
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[7].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[7].type);
   CU_ASSERT(" " == res[7].value);
 
-  CU_ASSERT(SHRPX_LOGF_BODY_BYTES_SENT == res[8].type);
+  CU_ASSERT(LogFragmentType::BODY_BYTES_SENT == res[8].type);
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[9].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[9].type);
   CU_ASSERT(" \"" == res[9].value);
 
-  CU_ASSERT(SHRPX_LOGF_HTTP == res[10].type);
+  CU_ASSERT(LogFragmentType::HTTP == res[10].type);
   CU_ASSERT("referer" == res[10].value);
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[11].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[11].type);
   CU_ASSERT("\" " == res[11].value);
 
-  CU_ASSERT(SHRPX_LOGF_AUTHORITY == res[12].type);
+  CU_ASSERT(LogFragmentType::AUTHORITY == res[12].type);
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[13].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[13].type);
   CU_ASSERT(" \"" == res[13].value);
 
-  CU_ASSERT(SHRPX_LOGF_HTTP == res[14].type);
+  CU_ASSERT(LogFragmentType::HTTP == res[14].type);
   CU_ASSERT("user-agent" == res[14].value);
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[15].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[15].type);
   CU_ASSERT("\"" == res[15].value);
 
   res = parse_log_format(balloc, StringRef::from_lit("$"));
 
   CU_ASSERT(1 == res.size());
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[0].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[0].type);
   CU_ASSERT("$" == res[0].value);
 
   res = parse_log_format(balloc, StringRef::from_lit("${"));
 
   CU_ASSERT(1 == res.size());
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[0].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[0].type);
   CU_ASSERT("${" == res[0].value);
 
   res = parse_log_format(balloc, StringRef::from_lit("${a"));
 
   CU_ASSERT(1 == res.size());
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[0].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[0].type);
   CU_ASSERT("${a" == res[0].value);
 
   res = parse_log_format(balloc, StringRef::from_lit("${a "));
 
   CU_ASSERT(1 == res.size());
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[0].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[0].type);
   CU_ASSERT("${a " == res[0].value);
 
   res = parse_log_format(balloc, StringRef::from_lit("$$remote_addr"));
 
   CU_ASSERT(2 == res.size());
 
-  CU_ASSERT(SHRPX_LOGF_LITERAL == res[0].type);
+  CU_ASSERT(LogFragmentType::LITERAL == res[0].type);
   CU_ASSERT("$" == res[0].value);
 
-  CU_ASSERT(SHRPX_LOGF_REMOTE_ADDR == res[1].type);
+  CU_ASSERT(LogFragmentType::REMOTE_ADDR == res[1].type);
   CU_ASSERT("" == res[1].value);
 }
 
 void test_shrpx_config_read_tls_ticket_key_file(void) {
   char file1[] = "/tmp/nghttpx-unittest.XXXXXX";
   auto fd1 = mkstemp(file1);
-  assert(fd1 != -1);
-  assert(48 ==
-         write(fd1, "0..............12..............34..............5", 48));
+  CU_ASSERT(fd1 != -1);
+  CU_ASSERT(48 ==
+            write(fd1, "0..............12..............34..............5", 48));
   char file2[] = "/tmp/nghttpx-unittest.XXXXXX";
   auto fd2 = mkstemp(file2);
-  assert(fd2 != -1);
-  assert(48 ==
-         write(fd2, "6..............78..............9a..............b", 48));
+  CU_ASSERT(fd2 != -1);
+  CU_ASSERT(48 ==
+            write(fd2, "6..............78..............9a..............b", 48));
 
   close(fd1);
   close(fd2);
@@ -203,16 +204,18 @@ void test_shrpx_config_read_tls_ticket_key_file(void) {
 void test_shrpx_config_read_tls_ticket_key_file_aes_256(void) {
   char file1[] = "/tmp/nghttpx-unittest.XXXXXX";
   auto fd1 = mkstemp(file1);
-  assert(fd1 != -1);
-  assert(80 == write(fd1, "0..............12..............................34..."
-                          "...........................5",
-                     80));
+  CU_ASSERT(fd1 != -1);
+  CU_ASSERT(80 == write(fd1,
+                        "0..............12..............................34..."
+                        "...........................5",
+                        80));
   char file2[] = "/tmp/nghttpx-unittest.XXXXXX";
   auto fd2 = mkstemp(file2);
-  assert(fd2 != -1);
-  assert(80 == write(fd2, "6..............78..............................9a..."
-                          "...........................b",
-                     80));
+  CU_ASSERT(fd2 != -1);
+  CU_ASSERT(80 == write(fd2,
+                        "6..............78..............................9a..."
+                        "...........................b",
+                        80));
 
   close(fd1);
   close(fd2);

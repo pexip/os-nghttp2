@@ -30,8 +30,8 @@
 /* Define to 1 if your system has a working `chown' function. */
 #undef HAVE_CHOWN
 
-/* define if the compiler supports basic C++11 syntax */
-#undef HAVE_CXX11
+/* define if the compiler supports basic C++14 syntax */
+#undef HAVE_CXX14
 
 /* Define to 1 if you have the declaration of `initgroups', and to 0 if you
    don't. */
@@ -65,6 +65,9 @@
 /* Define to 1 if you have `libjansson` library. */
 #undef HAVE_JANSSON
 
+/* Define to 1 if you have `libsystemd` library. */
+#undef HAVE_LIBSYSTEMD
+
 /* Define to 1 if you have `libxml2` library. */
 #undef HAVE_LIBXML2
 
@@ -85,6 +88,9 @@
 
 /* Define to 1 if you have the `memset' function. */
 #undef HAVE_MEMSET
+
+/* Define to 1 if you have the `mkostemp' function. */
+#undef HAVE_MKOSTEMP
 
 /* Define to 1 if you have `mruby` library. */
 #undef HAVE_MRUBY
@@ -115,9 +121,6 @@
 
 /* Define to 1 if you have the `socket' function. */
 #undef HAVE_SOCKET
-
-/* Define to 1 if you have `spdylay` library. */
-#undef HAVE_SPDYLAY
 
 /* Define to 1 if you have the `sqrt' function. */
 #undef HAVE_SQRT
@@ -329,9 +332,6 @@
    <pthread.h>, or <semaphore.h> is not used. If the typedef were allowed, the
    #define below would cause a syntax error. */
 #undef _UINT8_T
-
-/* Hint to the compiler that a function parameter is not used */
-#undef _U_
 
 /* Define to `int' if <sys/types.h> doesn't define. */
 #undef gid_t

@@ -49,6 +49,7 @@ class HttpsUpstream;
 class ConnectBlocker;
 class DownstreamConnectionPool;
 class Worker;
+class Downstream;
 struct WorkerStat;
 struct DownstreamAddrGroup;
 struct DownstreamAddr;
@@ -98,8 +99,14 @@ public:
 
   void pool_downstream_connection(std::unique_ptr<DownstreamConnection> dconn);
   void remove_downstream_connection(DownstreamConnection *dconn);
+  // Returns DownstreamConnection object based on request path.  This
+  // function returns non-null DownstreamConnection, and assigns 0 to
+  // |err| if it succeeds, or returns nullptr, and assigns negative
+  // error code to |err|.  If |pref_proto| is not PROTO_NONE, choose
+  // backend whose protocol is |pref_proto|.
   std::unique_ptr<DownstreamConnection>
-  get_downstream_connection(Downstream *downstream);
+  get_downstream_connection(int &err, Downstream *downstream,
+                            Proto pref_proto = Proto::NONE);
   MemchunkPool *get_mcpool();
   SSL *get_ssl() const;
   // Call this function when HTTP/2 connection header is received at
@@ -118,13 +125,12 @@ public:
   // must not be nullptr.
   void write_accesslog(Downstream *downstream);
 
-  // Writes upstream accesslog.  This function is used if
-  // corresponding Downstream object is not available.
-  void write_accesslog(int major, int minor, unsigned int status,
-                       int64_t body_bytes_sent);
   Worker *get_worker() const;
 
-  using ReadBuf = Buffer<16_k>;
+  // Initializes forwarded_for_.
+  void init_forwarded_for(int family, const StringRef &ipaddr);
+
+  using ReadBuf = DefaultMemchunkBuffer;
 
   ReadBuf *get_rb();
 
@@ -132,8 +138,6 @@ public:
   RateLimit *get_wlimit();
 
   void signal_write();
-  // Use this for HTTP/1 frontend since it produces better result.
-  void signal_write_no_wait();
   ev_io *get_wev();
 
   void setup_upstream_io_callback();
@@ -151,6 +155,11 @@ public:
   Http2Session *select_http2_session_with_affinity(
       const std::shared_ptr<DownstreamAddrGroup> &group, DownstreamAddr *addr);
 
+  // Returns an affinity cookie value for |downstream|.  |cookie_name|
+  // is used to inspect cookie header field in request header fields.
+  uint32_t get_affinity_cookie(Downstream *downstream,
+                               const StringRef &cookie_name);
+
   const UpstreamAddr *get_upstream_addr() const;
 
   void repeat_read_timer();
@@ -164,6 +173,9 @@ public:
   // Returns TLS SNI extension value client sent in this connection.
   StringRef get_tls_sni() const;
 
+  // Returns ALPN negotiated in this connection.
+  StringRef get_alpn() const;
+
   BlockAllocator &get_block_allocator();
 
 private:
@@ -171,6 +183,7 @@ private:
   // sure that the allocations must be bounded, and not proportional
   // to the number of requests.
   BlockAllocator balloc_;
+  DefaultMemchunkBuffer rb_;
   Connection conn_;
   ev_timer reneg_shutdown_timer_;
   std::unique_ptr<Upstream> upstream_;
@@ -197,7 +210,6 @@ private:
   bool should_close_after_write_;
   // true if affinity_hash_ is computed
   bool affinity_hash_computed_;
-  ReadBuf rb_;
 };
 
 } // namespace shrpx
