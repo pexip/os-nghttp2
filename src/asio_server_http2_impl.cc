@@ -28,7 +28,7 @@
 
 #include "asio_server.h"
 #include "util.h"
-#include "ssl.h"
+#include "tls.h"
 #include "template.h"
 
 namespace nghttp2 {
@@ -77,6 +77,8 @@ const std::vector<std::shared_ptr<boost::asio::io_service>> &
 http2_impl::io_services() const {
   return server_->io_services();
 }
+
+std::vector<int> http2_impl::ports() const { return server_->ports(); }
 
 } // namespace server
 

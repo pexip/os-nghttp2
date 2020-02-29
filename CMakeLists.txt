@@ -24,15 +24,15 @@
 
 cmake_minimum_required(VERSION 3.0)
 # XXX using 1.8.90 instead of 1.9.0-DEV
-project(nghttp2 VERSION 1.18.1)
+project(nghttp2 VERSION 1.36.0)
 
 # See versioning rule:
 #  http://www.gnu.org/software/libtool/manual/html_node/Updating-version-info.html
-set(LT_CURRENT  26)
-set(LT_REVISION 3)
-set(LT_AGE      12)
+set(LT_CURRENT  31)
+set(LT_REVISION 1)
+set(LT_AGE      17)
 
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake" ${CMAKE_MODULE_PATH})
 include(Version)
 
 math(EXPR LT_SOVERSION "${LT_CURRENT} - ${LT_AGE}")
@@ -79,7 +79,7 @@ else()
   set(ENABLE_PYTHON_BINDINGS_DEFAULT OFF)
 endif()
 
-find_package(LibXml2 2.7.7)
+find_package(LibXml2 2.6.26)
 set(WITH_LIBXML2_DEFAULT    ${LIBXML2_FOUND})
 find_package(Jemalloc)
 set(WITH_JEMALLOC_DEFAULT   ${JEMALLOC_FOUND})
@@ -106,28 +106,18 @@ endif()
 foreach(_build_type "Release" "MinSizeRel" "RelWithDebInfo")
   foreach(_lang C CXX)
     string(TOUPPER "CMAKE_${_lang}_FLAGS_${_build_type}" _var)
-    string(REGEX REPLACE "(^| )[/-]D *NDEBUG($| )" "" ${_var} "${${_var}}")
+    string(REGEX REPLACE "(^| )[/-]D *NDEBUG($| )" " " ${_var} "${${_var}}")
   endforeach()
 endforeach()
 
-#
-# If we're running GCC or clang define _U_ to be "__attribute__((unused))"
-# so we can use _U_ to flag unused function parameters and not get warnings
-# about them. Otherwise, define _U_ to be an empty string so that _U_ used
-# to flag an unused function parameters will compile with other compilers.
-#
-# XXX - similar hints for other compilers?
-#
 if(CMAKE_C_COMPILER_ID MATCHES "GNU" OR CMAKE_C_COMPILER_ID MATCHES "Clang")
-  set(HINT_UNUSED_PARAM   "__attribute__((unused))")
   set(HINT_NORETURN       "__attribute__((noreturn))")
 else()
-  set(HINT_UNUSED_PARAM)
   set(HINT_NORETURN)
 endif()
 
 include(ExtractValidFlags)
-foreach(_cxx1x_flag -std=c++11 -std=c++0x)
+foreach(_cxx1x_flag -std=c++14)
   extract_valid_cxx_flags(_cxx1x_flag_supported ${_cxx1x_flag})
   if(_cxx1x_flag_supported)
     set(CXX1XCXXFLAGS ${_cxx1x_flag})
@@ -312,6 +302,7 @@ check_type_size("time_t"  SIZEOF_TIME_T)
 include(CheckFunctionExists)
 check_function_exists(_Exit     HAVE__EXIT)
 check_function_exists(accept4   HAVE_ACCEPT4)
+check_function_exists(mkostemp  HAVE_MKOSTEMP)
 
 include(CheckSymbolExists)
 # XXX does this correctly detect initgroups (un)availability on cygwin?

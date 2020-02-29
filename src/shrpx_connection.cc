@@ -25,7 +25,7 @@
 #include "shrpx_connection.h"
 
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif // HAVE_UNISTD_H
 #include <netinet/tcp.h>
 
@@ -33,8 +33,9 @@
 
 #include <openssl/err.h>
 
-#include "shrpx_ssl.h"
+#include "shrpx_tls.h"
 #include "shrpx_memcached_request.h"
+#include "shrpx_log.h"
 #include "memchunk.h"
 #include "util.h"
 #include "ssl_compat.h"
@@ -43,13 +44,13 @@ using namespace nghttp2;
 
 namespace shrpx {
 
-#if !OPENSSL_1_1_API
+#if !LIBRESSL_2_7_API && !OPENSSL_1_1_API
 
 void *BIO_get_data(BIO *bio) { return bio->ptr; }
 void BIO_set_data(BIO *bio, void *ptr) { bio->ptr = ptr; }
 void BIO_set_init(BIO *bio, int init) { bio->init = init; }
 
-#endif // !OPENSSL_1_1_API
+#endif // !LIBRESSL_2_7_API && !OPENSSL_1_1_API
 
 Connection::Connection(struct ev_loop *loop, int fd, SSL *ssl,
                        MemchunkPool *mcpool, ev_tstamp write_timeout,
@@ -58,8 +59,9 @@ Connection::Connection(struct ev_loop *loop, int fd, SSL *ssl,
                        const RateLimitConfig &read_limit, IOCb writecb,
                        IOCb readcb, TimerCb timeoutcb, void *data,
                        size_t tls_dyn_rec_warmup_threshold,
-                       ev_tstamp tls_dyn_rec_idle_timeout, shrpx_proto proto)
-    : tls{DefaultMemchunks(mcpool), DefaultPeekMemchunks(mcpool)},
+                       ev_tstamp tls_dyn_rec_idle_timeout, Proto proto)
+    : tls{DefaultMemchunks(mcpool), DefaultPeekMemchunks(mcpool),
+          DefaultMemchunks(mcpool)},
       wlimit(loop, &wev, write_limit.rate, write_limit.burst),
       rlimit(loop, &rev, read_limit.rate, read_limit.burst, this),
       loop(loop),
@@ -95,7 +97,8 @@ Connection::~Connection() { disconnect(); }
 
 void Connection::disconnect() {
   if (tls.ssl) {
-    SSL_set_shutdown(tls.ssl, SSL_RECEIVED_SHUTDOWN);
+    SSL_set_shutdown(tls.ssl,
+                     SSL_get_shutdown(tls.ssl) | SSL_RECEIVED_SHUTDOWN);
     ERR_clear_error();
 
     if (tls.cached_session) {
@@ -118,9 +121,11 @@ void Connection::disconnect() {
     tls.warmup_writelen = 0;
     tls.last_writelen = 0;
     tls.last_readlen = 0;
-    tls.handshake_state = 0;
+    tls.handshake_state = TLSHandshakeState::NORMAL;
     tls.initial_handshake_done = false;
     tls.reneg_started = false;
+    tls.sct_requested = false;
+    tls.early_data_finish = false;
   }
 
   if (fd != -1) {
@@ -138,9 +143,16 @@ void Connection::disconnect() {
   wlimit.stopw();
 }
 
-void Connection::prepare_client_handshake() { SSL_set_connect_state(tls.ssl); }
+void Connection::prepare_client_handshake() {
+  SSL_set_connect_state(tls.ssl);
+  // This prevents SSL_read_early_data from being called.
+  tls.early_data_finish = true;
+}
 
-void Connection::prepare_server_handshake() { SSL_set_accept_state(tls.ssl); }
+void Connection::prepare_server_handshake() {
+  SSL_set_accept_state(tls.ssl);
+  tls.server_handshake = true;
+}
 
 // BIO implementation is inspired by openldap implementation:
 // http://www.openldap.org/devel/cvsweb.cgi/~checkout~/libraries/libldap/tls_o.c
@@ -283,21 +295,17 @@ BIO_METHOD *create_bio_method() {
   return meth;
 }
 
-void delete_bio_method(BIO_METHOD *bio_method) { BIO_meth_free(bio_method); }
-
 #else // !OPENSSL_1_1_API
 
 BIO_METHOD *create_bio_method() {
-  static BIO_METHOD shrpx_bio_method = {
+  static auto meth = new BIO_METHOD{
       BIO_TYPE_FD,    "nghttpx-bio",    shrpx_bio_write,
       shrpx_bio_read, shrpx_bio_puts,   shrpx_bio_gets,
       shrpx_bio_ctrl, shrpx_bio_create, shrpx_bio_destroy,
   };
 
-  return &shrpx_bio_method;
+  return meth;
 }
-
-void delete_bio_method(BIO_METHOD *bio_method) {}
 
 #endif // !OPENSSL_1_1_API
 
@@ -314,7 +322,7 @@ void Connection::set_ssl(SSL *ssl) {
 namespace {
 // We should buffer at least full encrypted TLS record here.
 // Theoretically, peer can send client hello in several TLS records,
-// which could exeed this limit, but it is not portable, and we don't
+// which could exceed this limit, but it is not portable, and we don't
 // have to handle such exotic behaviour.
 bool read_buffer_full(DefaultPeekMemchunks &rbuf) {
   return rbuf.rleft_buffered() >= 20_k;
@@ -325,8 +333,9 @@ int Connection::tls_handshake() {
   wlimit.stopw();
   ev_timer_stop(loop, &wt);
 
+  std::array<uint8_t, 16_k> buf;
+
   if (ev_is_active(&rev)) {
-    std::array<uint8_t, 8_k> buf;
     auto nread = read_clear(buf.data(), buf.size());
     if (nread < 0) {
       if (LOG_ENABLED(INFO)) {
@@ -345,9 +354,9 @@ int Connection::tls_handshake() {
   }
 
   switch (tls.handshake_state) {
-  case TLS_CONN_WAIT_FOR_SESSION_CACHE:
+  case TLSHandshakeState::WAIT_FOR_SESSION_CACHE:
     return SHRPX_ERR_INPROGRESS;
-  case TLS_CONN_GOT_SESSION_CACHE: {
+  case TLSHandshakeState::GOT_SESSION_CACHE: {
     // Use the same trick invented by @kazuho in h2o project.
 
     // Discard all outgoing data.
@@ -359,7 +368,7 @@ int Connection::tls_handshake() {
     auto ssl_opts = SSL_get_options(tls.ssl);
     SSL_free(tls.ssl);
 
-    auto ssl = ssl::create_ssl(ssl_ctx);
+    auto ssl = tls::create_ssl(ssl_ctx);
     if (!ssl) {
       return -1;
     }
@@ -371,15 +380,75 @@ int Connection::tls_handshake() {
 
     SSL_set_accept_state(tls.ssl);
 
-    tls.handshake_state = TLS_CONN_NORMAL;
+    tls.handshake_state = TLSHandshakeState::NORMAL;
     break;
   }
-  case TLS_CONN_CANCEL_SESSION_CACHE:
-    tls.handshake_state = TLS_CONN_NORMAL;
+  case TLSHandshakeState::CANCEL_SESSION_CACHE:
+    tls.handshake_state = TLSHandshakeState::NORMAL;
+    break;
+  default:
     break;
   }
 
-  auto rv = SSL_do_handshake(tls.ssl);
+  int rv;
+
+  ERR_clear_error();
+
+#if OPENSSL_1_1_1_API
+  if (!tls.server_handshake || tls.early_data_finish) {
+    rv = SSL_do_handshake(tls.ssl);
+  } else {
+    auto &tlsconf = get_config()->tls;
+    for (;;) {
+      size_t nread;
+
+      rv = SSL_read_early_data(tls.ssl, buf.data(), buf.size(), &nread);
+      if (rv == SSL_READ_EARLY_DATA_ERROR) {
+        // If we have early data, and server sends ServerHello, assume
+        // that handshake is completed in server side, and start
+        // processing request.  If we don't exit handshake code here,
+        // server waits for EndOfEarlyData and Finished message from
+        // client, which voids the purpose of 0-RTT data.  The left
+        // over of handshake is done through write_tls or read_tls.
+        if (tlsconf.no_postpone_early_data &&
+            (tls.handshake_state == TLSHandshakeState::WRITE_STARTED ||
+             tls.wbuf.rleft()) &&
+            tls.earlybuf.rleft()) {
+          rv = 1;
+        }
+
+        break;
+      }
+
+      if (LOG_ENABLED(INFO)) {
+        LOG(INFO) << "tls: read early data " << nread << " bytes";
+      }
+
+      tls.earlybuf.append(buf.data(), nread);
+
+      if (rv == SSL_READ_EARLY_DATA_FINISH) {
+        if (LOG_ENABLED(INFO)) {
+          LOG(INFO) << "tls: read all early data; total "
+                    << tls.earlybuf.rleft() << " bytes";
+        }
+        tls.early_data_finish = true;
+        // The same reason stated above.
+        if (tlsconf.no_postpone_early_data &&
+            (tls.handshake_state == TLSHandshakeState::WRITE_STARTED ||
+             tls.wbuf.rleft()) &&
+            tls.earlybuf.rleft()) {
+          rv = 1;
+        } else {
+          ERR_clear_error();
+          rv = SSL_do_handshake(tls.ssl);
+        }
+        break;
+      }
+    }
+  }
+#else  // !OPENSSL_1_1_1_API
+  rv = SSL_do_handshake(tls.ssl);
+#endif // !OPENSSL_1_1_1_API
 
   if (rv <= 0) {
     auto err = SSL_get_error(tls.ssl, rv);
@@ -394,12 +463,21 @@ int Connection::tls_handshake() {
       break;
     case SSL_ERROR_WANT_WRITE:
       break;
-    case SSL_ERROR_SSL:
+    case SSL_ERROR_SSL: {
       if (LOG_ENABLED(INFO)) {
         LOG(INFO) << "tls: handshake libssl error: "
                   << ERR_error_string(ERR_get_error(), nullptr);
       }
+
+      struct iovec iov;
+      auto iovcnt = tls.wbuf.riovec(&iov, 1);
+      auto nwrite = writev_clear(&iov, iovcnt);
+      if (nwrite > 0) {
+        tls.wbuf.drain(nwrite);
+      }
+
       return SHRPX_ERR_NETWORK;
+    }
     default:
       if (LOG_ENABLED(INFO)) {
         LOG(INFO) << "tls: handshake libssl error " << err;
@@ -408,7 +486,7 @@ int Connection::tls_handshake() {
     }
   }
 
-  if (tls.handshake_state == TLS_CONN_WAIT_FOR_SESSION_CACHE) {
+  if (tls.handshake_state == TLSHandshakeState::WAIT_FOR_SESSION_CACHE) {
     if (LOG_ENABLED(INFO)) {
       LOG(INFO) << "tls: handshake is still in progress";
     }
@@ -420,8 +498,8 @@ int Connection::tls_handshake() {
   // negotiated before sending finished message to the peer.
   if (rv != 1 && tls.wbuf.rleft()) {
     // First write indicates that resumption stuff has done.
-    if (tls.handshake_state != TLS_CONN_WRITE_STARTED) {
-      tls.handshake_state = TLS_CONN_WRITE_STARTED;
+    if (tls.handshake_state != TLSHandshakeState::WRITE_STARTED) {
+      tls.handshake_state = TLSHandshakeState::WRITE_STARTED;
       // If peek has already disabled, this is noop.
       tls.rbuf.disable_peek(true);
     }
@@ -501,8 +579,14 @@ int Connection::write_tls_pending_handshake() {
 
   if (LOG_ENABLED(INFO)) {
     LOG(INFO) << "SSL/TLS handshake completed";
-    if (SSL_session_reused(tls.ssl)) {
-      LOG(INFO) << "SSL/TLS session reused";
+    nghttp2::tls::TLSSessionInfo tls_info{};
+    if (nghttp2::tls::get_tls_session_info(&tls_info, tls.ssl)) {
+      LOG(INFO) << "cipher=" << tls_info.cipher
+                << " protocol=" << tls_info.protocol
+                << " resumption=" << (tls_info.session_reused ? "yes" : "no")
+                << " session_id="
+                << util::format_hex(tls_info.session_id,
+                                    tls_info.session_id_length);
     }
   }
 
@@ -513,7 +597,9 @@ int Connection::check_http2_requirement() {
   const unsigned char *next_proto = nullptr;
   unsigned int next_proto_len;
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
   SSL_get0_next_proto_negotiated(tls.ssl, &next_proto, &next_proto_len);
+#endif // !OPENSSL_NO_NEXTPROTONEG
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
   if (next_proto == nullptr) {
     SSL_get0_alpn_selected(tls.ssl, &next_proto, &next_proto_len);
@@ -523,14 +609,22 @@ int Connection::check_http2_requirement() {
       !util::check_h2_is_selected(StringRef{next_proto, next_proto_len})) {
     return 0;
   }
-  if (!nghttp2::ssl::check_http2_tls_version(tls.ssl)) {
+  if (!nghttp2::tls::check_http2_tls_version(tls.ssl)) {
     if (LOG_ENABLED(INFO)) {
       LOG(INFO) << "TLSv1.2 was not negotiated.  HTTP/2 must not be used.";
     }
     return -1;
   }
-  if (!get_config()->tls.no_http2_cipher_black_list &&
-      nghttp2::ssl::check_http2_cipher_black_list(tls.ssl)) {
+
+  auto check_black_list = false;
+  if (tls.server_handshake) {
+    check_black_list = !get_config()->tls.no_http2_cipher_black_list;
+  } else {
+    check_black_list = !get_config()->tls.client.no_http2_cipher_black_list;
+  }
+
+  if (check_black_list &&
+      nghttp2::tls::check_http2_cipher_black_list(tls.ssl)) {
     if (LOG_ENABLED(INFO)) {
       LOG(INFO) << "The negotiated cipher suite is in HTTP/2 cipher suite "
                    "black list.  HTTP/2 must not be used.";
@@ -542,7 +636,7 @@ int Connection::check_http2_requirement() {
 }
 
 namespace {
-const size_t SHRPX_SMALL_WRITE_LIMIT = 1300;
+constexpr size_t SHRPX_SMALL_WRITE_LIMIT = 1300;
 } // namespace
 
 size_t Connection::get_tls_write_limit() {
@@ -599,7 +693,23 @@ ssize_t Connection::write_tls(const void *data, size_t len) {
 
   tls.last_write_idle = -1.;
 
+  ERR_clear_error();
+
+#if OPENSSL_1_1_1_API
+  int rv;
+  if (SSL_is_init_finished(tls.ssl)) {
+    rv = SSL_write(tls.ssl, data, len);
+  } else {
+    size_t nwrite;
+    rv = SSL_write_early_data(tls.ssl, data, len, &nwrite);
+    // Use the same semantics with SSL_write.
+    if (rv == 1) {
+      rv = nwrite;
+    }
+  }
+#else  // !OPENSSL_1_1_1_API
   auto rv = SSL_write(tls.ssl, data, len);
+#endif // !OPENSSL_1_1_1_API
 
   if (rv <= 0) {
     auto err = SSL_get_error(tls.ssl, rv);
@@ -634,6 +744,14 @@ ssize_t Connection::write_tls(const void *data, size_t len) {
 }
 
 ssize_t Connection::read_tls(void *data, size_t len) {
+  ERR_clear_error();
+
+#if OPENSSL_1_1_1_API
+  if (tls.earlybuf.rleft()) {
+    return tls.earlybuf.remove(data, len);
+  }
+#endif // OPENSSL_1_1_1_API
+
   // SSL_read requires the same arguments (buf pointer and its
   // length) on SSL_ERROR_WANT_READ or SSL_ERROR_WANT_WRITE.
   // rlimit_.avail() or rlimit_.avail() may return different length
@@ -650,6 +768,47 @@ ssize_t Connection::read_tls(void *data, size_t len) {
     len = tls.last_readlen;
     tls.last_readlen = 0;
   }
+
+#if OPENSSL_1_1_1_API
+  if (!tls.early_data_finish) {
+    // TLSv1.3 handshake is still going on.
+    size_t nread;
+    auto rv = SSL_read_early_data(tls.ssl, data, len, &nread);
+    if (rv == SSL_READ_EARLY_DATA_ERROR) {
+      auto err = SSL_get_error(tls.ssl, rv);
+      switch (err) {
+      case SSL_ERROR_WANT_READ:
+        tls.last_readlen = len;
+        return 0;
+      case SSL_ERROR_SSL:
+        if (LOG_ENABLED(INFO)) {
+          LOG(INFO) << "SSL_read: "
+                    << ERR_error_string(ERR_get_error(), nullptr);
+        }
+        return SHRPX_ERR_NETWORK;
+      default:
+        if (LOG_ENABLED(INFO)) {
+          LOG(INFO) << "SSL_read: SSL_get_error returned " << err;
+        }
+        return SHRPX_ERR_NETWORK;
+      }
+    }
+
+    if (LOG_ENABLED(INFO)) {
+      LOG(INFO) << "tls: read early data " << nread << " bytes";
+    }
+
+    if (rv == SSL_READ_EARLY_DATA_FINISH) {
+      if (LOG_ENABLED(INFO)) {
+        LOG(INFO) << "tls: read all early data";
+      }
+      tls.early_data_finish = true;
+      // We may have stopped write watcher in write_tls.
+      wlimit.startw();
+    }
+    return nread;
+  }
+#endif // OPENSSL_1_1_1_API
 
   auto rv = SSL_read(tls.ssl, data, len);
 
@@ -702,6 +861,10 @@ ssize_t Connection::write_clear(const void *data, size_t len) {
 
   wlimit.drain(nwrite);
 
+  if (ev_is_active(&wt)) {
+    ev_timer_again(loop, &wt);
+  }
+
   return nwrite;
 }
 
@@ -724,6 +887,10 @@ ssize_t Connection::writev_clear(struct iovec *iov, int iovcnt) {
   }
 
   wlimit.drain(nwrite);
+
+  if (ev_is_active(&wt)) {
+    ev_timer_again(loop, &wt);
+  }
 
   return nwrite;
 }
@@ -777,11 +944,25 @@ int Connection::get_tcp_hint(TCPHint *hint) const {
                            : 0;
 
   // http://www.slideshare.net/kazuho/programming-tcp-for-responsiveness
+
+  // TODO 29 (5 (header) + 8 (explicit nonce) + 16 (tag)) is TLS
+  // overhead for AES-GCM.  For CHACHA20_POLY1305, it is 21 since it
+  // does not need 8 bytes explicit nonce.
   //
-  // TODO 29 (5 + 8 + 16) is TLS overhead for AES-GCM.  For
-  // CHACHA20_POLY1305, it is 21 since it does not need 8 bytes
-  // explicit nonce.
-  auto writable_size = (avail_packets + 2) * (tcp_info.tcpi_snd_mss - 29);
+  // For TLSv1.3, AES-GCM and CHACHA20_POLY1305 overhead are now 22
+  // bytes (5 (header) + 1 (ContentType) + 16 (tag)).
+  size_t tls_overhead;
+#  ifdef TLS1_3_VERSION
+  if (SSL_version(tls.ssl) == TLS1_3_VERSION) {
+    tls_overhead = 22;
+  } else
+#  endif // TLS1_3_VERSION
+  {
+    tls_overhead = 29;
+  }
+
+  auto writable_size =
+      (avail_packets + 2) * (tcp_info.tcpi_snd_mss - tls_overhead);
   if (writable_size > 16_k) {
     writable_size = writable_size & ~(16_k - 1);
   } else {
@@ -789,7 +970,7 @@ int Connection::get_tcp_hint(TCPHint *hint) const {
       LOG(INFO) << "writable_size is too small: " << writable_size;
     }
     // TODO is this required?
-    writable_size = std::max(writable_size, static_cast<uint32_t>(536 * 2));
+    writable_size = std::max(writable_size, static_cast<size_t>(536 * 2));
   }
 
   // if (LOG_ENABLED(INFO)) {

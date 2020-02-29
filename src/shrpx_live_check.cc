@@ -25,7 +25,8 @@
 #include "shrpx_live_check.h"
 #include "shrpx_worker.h"
 #include "shrpx_connect_blocker.h"
-#include "shrpx_ssl.h"
+#include "shrpx_tls.h"
+#include "shrpx_log.h"
 
 namespace shrpx {
 
@@ -105,7 +106,7 @@ LiveCheck::LiveCheck(struct ev_loop *loop, SSL_CTX *ssl_ctx, Worker *worker,
             worker->get_downstream_config()->timeout.write,
             worker->get_downstream_config()->timeout.read, {}, {}, writecb,
             readcb, timeoutcb, this, get_config()->tls.dyn_rec.warmup_threshold,
-            get_config()->tls.dyn_rec.idle_timeout, PROTO_NONE),
+            get_config()->tls.dyn_rec.idle_timeout, Proto::NONE),
       wb_(worker->get_mcpool()),
       gen_(gen),
       read_(&LiveCheck::noop),
@@ -204,32 +205,33 @@ int LiveCheck::initiate_connection() {
   if (!dns_query_ && addr_->tls) {
     assert(ssl_ctx_);
 
-    auto ssl = ssl::create_ssl(ssl_ctx_);
+    auto ssl = tls::create_ssl(ssl_ctx_);
     if (!ssl) {
       return -1;
     }
 
     switch (addr_->proto) {
-    case PROTO_HTTP1:
-      ssl::setup_downstream_http1_alpn(ssl);
+    case Proto::HTTP1:
+      tls::setup_downstream_http1_alpn(ssl);
       break;
-    case PROTO_HTTP2:
-      ssl::setup_downstream_http2_alpn(ssl);
+    case Proto::HTTP2:
+      tls::setup_downstream_http2_alpn(ssl);
       break;
     default:
       assert(0);
     }
 
     conn_.set_ssl(ssl);
+    conn_.tls.client_session_cache = &addr_->tls_session_cache;
   }
 
   if (addr_->dns) {
     if (!dns_query_) {
-      auto dns_query = make_unique<DNSQuery>(
-          addr_->host, [this](int status, const Address *result) {
+      auto dns_query = std::make_unique<DNSQuery>(
+          addr_->host, [this](DNSResolverStatus status, const Address *result) {
             int rv;
 
-            if (status == DNS_STATUS_OK) {
+            if (status == DNSResolverStatus::OK) {
               *this->resolved_addr_ = *result;
             }
             rv = this->initiate_connection();
@@ -240,27 +242,26 @@ int LiveCheck::initiate_connection() {
       auto dns_tracker = worker_->get_dns_tracker();
 
       if (!resolved_addr_) {
-        resolved_addr_ = make_unique<Address>();
+        resolved_addr_ = std::make_unique<Address>();
       }
 
-      rv = dns_tracker->resolve(resolved_addr_.get(), dns_query.get());
-      switch (rv) {
-      case DNS_STATUS_ERROR:
+      switch (dns_tracker->resolve(resolved_addr_.get(), dns_query.get())) {
+      case DNSResolverStatus::ERROR:
         return -1;
-      case DNS_STATUS_RUNNING:
+      case DNSResolverStatus::RUNNING:
         dns_query_ = std::move(dns_query);
         return 0;
-      case DNS_STATUS_OK:
+      case DNSResolverStatus::OK:
         break;
       default:
         assert(0);
       }
     } else {
       switch (dns_query_->status) {
-      case DNS_STATUS_ERROR:
+      case DNSResolverStatus::ERROR:
         dns_query_.reset();
         return -1;
-      case DNS_STATUS_OK:
+      case DNSResolverStatus::OK:
         dns_query_.reset();
         break;
       default:
@@ -302,7 +303,7 @@ int LiveCheck::initiate_connection() {
       SSL_set_tlsext_host_name(conn_.tls.ssl, sni_name.c_str());
     }
 
-    auto session = ssl::reuse_tls_session(addr_->tls_session_cache);
+    auto session = tls::reuse_tls_session(addr_->tls_session_cache);
     if (session) {
       SSL_set_session(conn_.tls.ssl, session);
       SSL_SESSION_free(session);
@@ -357,7 +358,7 @@ int LiveCheck::connected() {
     return do_write();
   }
 
-  if (addr_->proto == PROTO_HTTP2) {
+  if (addr_->proto == Proto::HTTP2) {
     // For HTTP/2, we try to read SETTINGS ACK from server to make
     // sure it is really alive, and serving HTTP/2.
     read_ = &LiveCheck::read_clear;
@@ -395,16 +396,8 @@ int LiveCheck::tls_handshake() {
   }
 
   if (!get_config()->tls.insecure &&
-      ssl::check_cert(conn_.tls.ssl, addr_, raddr_) != 0) {
+      tls::check_cert(conn_.tls.ssl, addr_, raddr_) != 0) {
     return -1;
-  }
-
-  if (!SSL_session_reused(conn_.tls.ssl)) {
-    auto tls_session = SSL_get0_session(conn_.tls.ssl);
-    if (tls_session) {
-      ssl::try_cache_tls_session(addr_->tls_session_cache, *raddr_, tls_session,
-                                 ev_now(conn_.loop));
-    }
   }
 
   // Check negotiated ALPN
@@ -412,7 +405,9 @@ int LiveCheck::tls_handshake() {
   const unsigned char *next_proto = nullptr;
   unsigned int next_proto_len = 0;
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
   SSL_get0_next_proto_negotiated(conn_.tls.ssl, &next_proto, &next_proto_len);
+#endif // !OPENSSL_NO_NEXTPROTONEG
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
   if (next_proto == nullptr) {
     SSL_get0_alpn_selected(conn_.tls.ssl, &next_proto, &next_proto_len);
@@ -422,12 +417,12 @@ int LiveCheck::tls_handshake() {
   auto proto = StringRef{next_proto, next_proto_len};
 
   switch (addr_->proto) {
-  case PROTO_HTTP1:
+  case Proto::HTTP1:
     if (proto.empty() || proto == StringRef::from_lit("http/1.1")) {
       break;
     }
     return -1;
-  case PROTO_HTTP2:
+  case Proto::HTTP2:
     if (util::check_h2_is_selected(proto)) {
       // For HTTP/2, we try to read SETTINGS ACK from server to make
       // sure it is really alive, and serving HTTP/2.
@@ -484,7 +479,10 @@ int LiveCheck::write_tls() {
   for (;;) {
     if (wb_.rleft() > 0) {
       auto iovcnt = wb_.riovec(&iov, 1);
-      assert(iovcnt == 1);
+      if (iovcnt != 1) {
+        assert(0);
+        return -1;
+      }
       auto nwrite = conn_.write_tls(iov.iov_base, iov.iov_len);
 
       if (nwrite == 0) {
@@ -550,7 +548,10 @@ int LiveCheck::write_clear() {
   for (;;) {
     if (wb_.rleft() > 0) {
       auto iovcnt = wb_.riovec(&iov, 1);
-      assert(iovcnt == 1);
+      if (iovcnt != 1) {
+        assert(0);
+        return -1;
+      }
       auto nwrite = conn_.write_clear(iov.iov_base, iov.iov_len);
 
       if (nwrite == 0) {
@@ -774,7 +775,7 @@ int LiveCheck::connection_made() {
   }
 
   auto must_terminate =
-      addr_->tls && !nghttp2::ssl::check_http2_requirement(conn_.tls.ssl);
+      addr_->tls && !nghttp2::tls::check_http2_requirement(conn_.tls.ssl);
 
   if (must_terminate) {
     if (LOG_ENABLED(INFO)) {

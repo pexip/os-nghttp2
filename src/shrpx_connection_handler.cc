@@ -25,7 +25,7 @@
 #include "shrpx_connection_handler.h"
 
 #ifdef HAVE_UNISTD_H
-#include <unistd.h>
+#  include <unistd.h>
 #endif // HAVE_UNISTD_H
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -35,7 +35,7 @@
 #include <random>
 
 #include "shrpx_client_handler.h"
-#include "shrpx_ssl.h"
+#include "shrpx_tls.h"
 #include "shrpx_worker.h"
 #include "shrpx_config.h"
 #include "shrpx_http2_session.h"
@@ -44,6 +44,7 @@
 #include "shrpx_accept_handler.h"
 #include "shrpx_memcached_dispatcher.h"
 #include "shrpx_signal.h"
+#include "shrpx_log.h"
 #include "util.h"
 #include "template.h"
 
@@ -114,10 +115,14 @@ ConnectionHandler::ConnectionHandler(struct ev_loop *loop, std::mt19937 &gen)
     : gen_(gen),
       single_worker_(nullptr),
       loop_(loop),
+#ifdef HAVE_NEVERBLEED
+      nb_(nullptr),
+#endif // HAVE_NEVERBLEED
       tls_ticket_key_memcached_get_retry_count_(0),
       tls_ticket_key_memcached_fail_count_(0),
       worker_round_robin_cnt_(get_config()->api.enabled ? 1 : 0),
-      graceful_shutdown_(false) {
+      graceful_shutdown_(false),
+      enable_acceptor_on_ocsp_completion_(false) {
   ev_timer_init(&disable_acceptor_timer_, acceptor_disable_cb, 0., 0.);
   disable_acceptor_timer_.data = this;
 
@@ -153,7 +158,7 @@ ConnectionHandler::~ConnectionHandler() {
 
   for (auto ssl_ctx : all_ssl_ctx_) {
     auto tls_ctx_data =
-        static_cast<ssl::TLSContextData *>(SSL_CTX_get_app_data(ssl_ctx));
+        static_cast<tls::TLSContextData *>(SSL_CTX_get_app_data(ssl_ctx));
     if (tls_ctx_data) {
       delete tls_ctx_data;
     }
@@ -178,7 +183,7 @@ void ConnectionHandler::set_ticket_keys_to_worker(
 void ConnectionHandler::worker_reopen_log_files() {
   WorkerEvent wev{};
 
-  wev.type = REOPEN_LOG;
+  wev.type = WorkerEventType::REOPEN_LOG;
 
   for (auto &worker : workers_) {
     worker->send(wev);
@@ -189,7 +194,7 @@ void ConnectionHandler::worker_replace_downstream(
     std::shared_ptr<DownstreamConfig> downstreamconf) {
   WorkerEvent wev{};
 
-  wev.type = REPLACE_DOWNSTREAM;
+  wev.type = WorkerEventType::REPLACE_DOWNSTREAM;
   wev.downstreamconf = std::move(downstreamconf);
 
   for (auto &worker : workers_) {
@@ -198,18 +203,19 @@ void ConnectionHandler::worker_replace_downstream(
 }
 
 int ConnectionHandler::create_single_worker() {
-  cert_tree_ = ssl::create_cert_lookup_tree();
-  auto sv_ssl_ctx = ssl::setup_server_ssl_context(all_ssl_ctx_, cert_tree_.get()
+  cert_tree_ = tls::create_cert_lookup_tree();
+  auto sv_ssl_ctx = tls::setup_server_ssl_context(
+      all_ssl_ctx_, indexed_ssl_ctx_, cert_tree_.get()
 #ifdef HAVE_NEVERBLEED
-                                                                    ,
-                                                  nb_.get()
+                                          ,
+      nb_
 #endif // HAVE_NEVERBLEED
-                                                      );
-  auto cl_ssl_ctx = ssl::setup_downstream_client_ssl_context(
+  );
+  auto cl_ssl_ctx = tls::setup_downstream_client_ssl_context(
 #ifdef HAVE_NEVERBLEED
-      nb_.get()
+      nb_
 #endif // HAVE_NEVERBLEED
-          );
+  );
 
   if (cl_ssl_ctx) {
     all_ssl_ctx_.push_back(cl_ssl_ctx);
@@ -217,20 +223,22 @@ int ConnectionHandler::create_single_worker() {
 
   auto config = get_config();
   auto &tlsconf = config->tls;
-  auto &memcachedconf = config->tls.session_cache.memcached;
 
   SSL_CTX *session_cache_ssl_ctx = nullptr;
-  if (memcachedconf.tls) {
-    session_cache_ssl_ctx = ssl::create_ssl_client_context(
+  {
+    auto &memcachedconf = config->tls.session_cache.memcached;
+    if (memcachedconf.tls) {
+      session_cache_ssl_ctx = tls::create_ssl_client_context(
 #ifdef HAVE_NEVERBLEED
-        nb_.get(),
+          nb_,
 #endif // HAVE_NEVERBLEED
-        tlsconf.cacert, memcachedconf.cert_file, memcachedconf.private_key_file,
-        nullptr);
-    all_ssl_ctx_.push_back(session_cache_ssl_ctx);
+          tlsconf.cacert, memcachedconf.cert_file,
+          memcachedconf.private_key_file, nullptr);
+      all_ssl_ctx_.push_back(session_cache_ssl_ctx);
+    }
   }
 
-  single_worker_ = make_unique<Worker>(
+  single_worker_ = std::make_unique<Worker>(
       loop_, sv_ssl_ctx, cl_ssl_ctx, session_cache_ssl_ctx, cert_tree_.get(),
       ticket_keys_, this, config->conn.downstream);
 #ifdef HAVE_MRUBY
@@ -246,18 +254,19 @@ int ConnectionHandler::create_worker_thread(size_t num) {
 #ifndef NOTHREADS
   assert(workers_.size() == 0);
 
-  cert_tree_ = ssl::create_cert_lookup_tree();
-  auto sv_ssl_ctx = ssl::setup_server_ssl_context(all_ssl_ctx_, cert_tree_.get()
-#ifdef HAVE_NEVERBLEED
-                                                                    ,
-                                                  nb_.get()
-#endif // HAVE_NEVERBLEED
-                                                      );
-  auto cl_ssl_ctx = ssl::setup_downstream_client_ssl_context(
-#ifdef HAVE_NEVERBLEED
-      nb_.get()
-#endif // HAVE_NEVERBLEED
-          );
+  cert_tree_ = tls::create_cert_lookup_tree();
+  auto sv_ssl_ctx = tls::setup_server_ssl_context(
+      all_ssl_ctx_, indexed_ssl_ctx_, cert_tree_.get()
+#  ifdef HAVE_NEVERBLEED
+                                          ,
+      nb_
+#  endif // HAVE_NEVERBLEED
+  );
+  auto cl_ssl_ctx = tls::setup_downstream_client_ssl_context(
+#  ifdef HAVE_NEVERBLEED
+      nb_
+#  endif // HAVE_NEVERBLEED
+  );
 
   if (cl_ssl_ctx) {
     all_ssl_ctx_.push_back(cl_ssl_ctx);
@@ -265,7 +274,6 @@ int ConnectionHandler::create_worker_thread(size_t num) {
 
   auto config = get_config();
   auto &tlsconf = config->tls;
-  auto &memcachedconf = config->tls.session_cache.memcached;
   auto &apiconf = config->api;
 
   // We have dedicated worker for API request processing.
@@ -273,27 +281,32 @@ int ConnectionHandler::create_worker_thread(size_t num) {
     ++num;
   }
 
-  for (size_t i = 0; i < num; ++i) {
-    auto loop = ev_loop_new(config->ev_loop_flags);
+  SSL_CTX *session_cache_ssl_ctx = nullptr;
+  {
+    auto &memcachedconf = config->tls.session_cache.memcached;
 
-    SSL_CTX *session_cache_ssl_ctx = nullptr;
     if (memcachedconf.tls) {
-      session_cache_ssl_ctx = ssl::create_ssl_client_context(
-#ifdef HAVE_NEVERBLEED
-          nb_.get(),
-#endif // HAVE_NEVERBLEED
+      session_cache_ssl_ctx = tls::create_ssl_client_context(
+#  ifdef HAVE_NEVERBLEED
+          nb_,
+#  endif // HAVE_NEVERBLEED
           tlsconf.cacert, memcachedconf.cert_file,
           memcachedconf.private_key_file, nullptr);
       all_ssl_ctx_.push_back(session_cache_ssl_ctx);
     }
-    auto worker = make_unique<Worker>(
+  }
+
+  for (size_t i = 0; i < num; ++i) {
+    auto loop = ev_loop_new(config->ev_loop_flags);
+
+    auto worker = std::make_unique<Worker>(
         loop, sv_ssl_ctx, cl_ssl_ctx, session_cache_ssl_ctx, cert_tree_.get(),
         ticket_keys_, this, config->conn.downstream);
-#ifdef HAVE_MRUBY
+#  ifdef HAVE_MRUBY
     if (worker->create_mruby_context() != 0) {
       return -1;
     }
-#endif // HAVE_MRUBY
+#  endif // HAVE_MRUBY
 
     workers_.push_back(std::move(worker));
     worker_loops_.push_back(loop);
@@ -330,12 +343,12 @@ void ConnectionHandler::join_worker() {
 }
 
 void ConnectionHandler::graceful_shutdown_worker() {
-  if (get_config()->num_worker == 1) {
+  if (single_worker_) {
     return;
   }
 
   WorkerEvent wev{};
-  wev.type = GRACEFUL_SHUTDOWN;
+  wev.type = WorkerEventType::GRACEFUL_SHUTDOWN;
 
   if (LOG_ENABLED(INFO)) {
     LLOG(INFO, this) << "Sending graceful shutdown signal to worker";
@@ -349,10 +362,10 @@ void ConnectionHandler::graceful_shutdown_worker() {
   ev_async_start(loop_, &thread_join_asyncev_);
 
   thread_join_fut_ = std::async(std::launch::async, [this]() {
-    (void)reopen_log_files();
+    (void)reopen_log_files(get_config()->logging);
     join_worker();
     ev_async_send(get_loop(), &thread_join_asyncev_);
-    delete log_config();
+    delete_log_config();
   });
 #endif // NOTHREADS
 }
@@ -366,7 +379,7 @@ int ConnectionHandler::handle_connection(int fd, sockaddr *addr, int addrlen,
 
   auto config = get_config();
 
-  if (config->num_worker == 1) {
+  if (single_worker_) {
     auto &upstreamconf = config->conn.upstream;
     if (single_worker_->get_worker_stat()->num_connections >=
         upstreamconf.worker_connections) {
@@ -381,7 +394,7 @@ int ConnectionHandler::handle_connection(int fd, sockaddr *addr, int addrlen,
     }
 
     auto client =
-        ssl::accept_connection(single_worker_.get(), fd, addr, addrlen, faddr);
+        tls::accept_connection(single_worker_.get(), fd, addr, addrlen, faddr);
     if (!client) {
       LLOG(ERROR, this) << "ClientHandler creation failed";
 
@@ -394,7 +407,7 @@ int ConnectionHandler::handle_connection(int fd, sockaddr *addr, int addrlen,
 
   Worker *worker;
 
-  if (faddr->alt_mode == ALTMODE_API) {
+  if (faddr->alt_mode == UpstreamAltMode::API) {
     worker = workers_[0].get();
 
     if (LOG_ENABLED(INFO)) {
@@ -419,7 +432,7 @@ int ConnectionHandler::handle_connection(int fd, sockaddr *addr, int addrlen,
   }
 
   WorkerEvent wev{};
-  wev.type = NEW_CONNECTION;
+  wev.type = WorkerEventType::NEW_CONNECTION;
   wev.client_fd = fd;
   memcpy(&wev.client_addr, addr, addrlen);
   wev.client_addrlen = addrlen;
@@ -441,6 +454,8 @@ Worker *ConnectionHandler::get_single_worker() const {
 void ConnectionHandler::add_acceptor(std::unique_ptr<AcceptHandler> h) {
   acceptors_.push_back(std::move(h));
 }
+
+void ConnectionHandler::delete_acceptor() { acceptors_.clear(); }
 
 void ConnectionHandler::enable_acceptor() {
   for (auto &a : acceptors_) {
@@ -495,6 +510,9 @@ bool ConnectionHandler::get_graceful_shutdown() const {
 }
 
 void ConnectionHandler::cancel_ocsp_update() {
+  enable_acceptor_on_ocsp_completion_ = false;
+  ev_timer_stop(loop_, &ocsp_timer_);
+
   if (ocsp_.proc.pid == 0) {
     return;
   }
@@ -589,14 +607,14 @@ void ConnectionHandler::handle_ocsp_complete() {
 
   auto ssl_ctx = all_ssl_ctx_[ocsp_.next];
   auto tls_ctx_data =
-      static_cast<ssl::TLSContextData *>(SSL_CTX_get_app_data(ssl_ctx));
+      static_cast<tls::TLSContextData *>(SSL_CTX_get_app_data(ssl_ctx));
 
   auto rstatus = ocsp_.chldev.rstatus;
   auto status = WEXITSTATUS(rstatus);
   if (ocsp_.error || !WIFEXITED(rstatus) || status != 0) {
     LOG(WARN) << "ocsp query command for " << tls_ctx_data->cert_file
-              << " failed: error=" << ocsp_.error << ", rstatus=" << rstatus
-              << ", status=" << status;
+              << " failed: error=" << ocsp_.error << ", rstatus=" << log::hex
+              << rstatus << log::dec << ", status=" << status;
     ++ocsp_.next;
     proceed_next_cert_ocsp();
     return;
@@ -607,22 +625,27 @@ void ConnectionHandler::handle_ocsp_complete() {
               << " finished successfully";
   }
 
+  auto config = get_config();
+  auto &tlsconf = config->tls;
+
+  if (tlsconf.ocsp.no_verify ||
+      tls::verify_ocsp_response(ssl_ctx, ocsp_.resp.data(),
+                                ocsp_.resp.size()) == 0) {
 #ifndef OPENSSL_IS_BORINGSSL
-  {
-#ifdef HAVE_ATOMIC_STD_SHARED_PTR
+#  ifdef HAVE_ATOMIC_STD_SHARED_PTR
     std::atomic_store_explicit(
         &tls_ctx_data->ocsp_data,
         std::make_shared<std::vector<uint8_t>>(std::move(ocsp_.resp)),
         std::memory_order_release);
-#else  // !HAVE_ATOMIC_STD_SHARED_PTR
+#  else  // !HAVE_ATOMIC_STD_SHARED_PTR
     std::lock_guard<std::mutex> g(tls_ctx_data->mu);
     tls_ctx_data->ocsp_data =
         std::make_shared<std::vector<uint8_t>>(std::move(ocsp_.resp));
-#endif // !HAVE_ATOMIC_STD_SHARED_PTR
+#  endif // !HAVE_ATOMIC_STD_SHARED_PTR
+#else    // OPENSSL_IS_BORINGSSL
+    SSL_CTX_set_ocsp_response(ssl_ctx, ocsp_.resp.data(), ocsp_.resp.size());
+#endif   // OPENSSL_IS_BORINGSSL
   }
-#else  // OPENSSL_IS_BORINGSSL
-  SSL_CTX_set_ocsp_response(ssl_ctx, ocsp_.resp.data(), ocsp_.resp.size());
-#endif // OPENSSL_IS_BORINGSSL
 
   ++ocsp_.next;
   proceed_next_cert_ocsp();
@@ -647,12 +670,18 @@ void ConnectionHandler::proceed_next_cert_ocsp() {
       // We have updated all ocsp response, and schedule next update.
       ev_timer_set(&ocsp_timer_, get_config()->tls.ocsp.update_interval, 0.);
       ev_timer_start(loop_, &ocsp_timer_);
+
+      if (enable_acceptor_on_ocsp_completion_) {
+        enable_acceptor_on_ocsp_completion_ = false;
+        enable_acceptor();
+      }
+
       return;
     }
 
     auto ssl_ctx = all_ssl_ctx_[ocsp_.next];
     auto tls_ctx_data =
-        static_cast<ssl::TLSContextData *>(SSL_CTX_get_app_data(ssl_ctx));
+        static_cast<tls::TLSContextData *>(SSL_CTX_get_app_data(ssl_ctx));
 
     // client SSL_CTX is also included in all_ssl_ctx_, but has no
     // tls_ctx_data.
@@ -774,9 +803,9 @@ SSL_CTX *ConnectionHandler::create_tls_ticket_key_memcached_ssl_ctx() {
   auto &tlsconf = config->tls;
   auto &memcachedconf = config->tls.ticket.memcached;
 
-  auto ssl_ctx = ssl::create_ssl_client_context(
+  auto ssl_ctx = tls::create_ssl_client_context(
 #ifdef HAVE_NEVERBLEED
-      nb_.get(),
+      nb_,
 #endif // HAVE_NEVERBLEED
       tlsconf.cacert, memcachedconf.cert_file, memcachedconf.private_key_file,
       nullptr);
@@ -787,12 +816,7 @@ SSL_CTX *ConnectionHandler::create_tls_ticket_key_memcached_ssl_ctx() {
 }
 
 #ifdef HAVE_NEVERBLEED
-void ConnectionHandler::set_neverbleed(std::unique_ptr<neverbleed_t> nb) {
-  nb_ = std::move(nb);
-}
-
-neverbleed_t *ConnectionHandler::get_neverbleed() const { return nb_.get(); }
-
+void ConnectionHandler::set_neverbleed(neverbleed_t *nb) { nb_ = nb; }
 #endif // HAVE_NEVERBLEED
 
 void ConnectionHandler::handle_serial_event() {
@@ -804,7 +828,7 @@ void ConnectionHandler::handle_serial_event() {
 
   for (auto &sev : q) {
     switch (sev.type) {
-    case SEV_REPLACE_DOWNSTREAM:
+    case SerialEventType::REPLACE_DOWNSTREAM:
       // Mmake sure that none of worker uses
       // get_config()->conn.downstream
       mod_config()->conn.downstream = sev.downstreamconf;
@@ -818,13 +842,16 @@ void ConnectionHandler::handle_serial_event() {
       worker_replace_downstream(sev.downstreamconf);
 
       break;
+    default:
+      break;
     }
   }
 }
 
 void ConnectionHandler::send_replace_downstream(
     const std::shared_ptr<DownstreamConfig> &downstreamconf) {
-  send_serial_event(SerialEvent(SEV_REPLACE_DOWNSTREAM, downstreamconf));
+  send_serial_event(
+      SerialEvent(SerialEventType::REPLACE_DOWNSTREAM, downstreamconf));
 }
 
 void ConnectionHandler::send_serial_event(SerialEvent ev) {
@@ -839,6 +866,15 @@ void ConnectionHandler::send_serial_event(SerialEvent ev) {
 
 SSL_CTX *ConnectionHandler::get_ssl_ctx(size_t idx) const {
   return all_ssl_ctx_[idx];
+}
+
+const std::vector<SSL_CTX *> &
+ConnectionHandler::get_indexed_ssl_ctx(size_t idx) const {
+  return indexed_ssl_ctx_[idx];
+}
+
+void ConnectionHandler::set_enable_acceptor_on_ocsp_completion(bool f) {
+  enable_acceptor_on_ocsp_completion_ = f;
 }
 
 } // namespace shrpx

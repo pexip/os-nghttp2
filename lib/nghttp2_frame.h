@@ -26,7 +26,7 @@
 #define NGHTTP2_FRAME_H
 
 #ifdef HAVE_CONFIG_H
-#include <config.h>
+#  include <config.h>
 #endif /* HAVE_CONFIG_H */
 
 #include <nghttp2/nghttp2.h>
@@ -70,7 +70,10 @@
 #define NGHTTP2_MAX_PADLEN 256
 
 /* Union of extension frame payload */
-typedef union { nghttp2_ext_altsvc altsvc; } nghttp2_ext_frame_payload;
+typedef union {
+  nghttp2_ext_altsvc altsvc;
+  nghttp2_ext_origin origin;
+} nghttp2_ext_frame_payload;
 
 void nghttp2_frame_pack_frame_hd(uint8_t *buf, const nghttp2_frame_hd *hd);
 
@@ -104,8 +107,7 @@ void nghttp2_frame_pack_priority_spec(uint8_t *buf,
  * assumes the |payload| contains whole priority specification.
  */
 void nghttp2_frame_unpack_priority_spec(nghttp2_priority_spec *pri_spec,
-                                        uint8_t flags, const uint8_t *payload,
-                                        size_t payloadlen);
+                                        const uint8_t *payload);
 
 /*
  * Returns the offset from the HEADERS frame payload where the
@@ -144,8 +146,7 @@ int nghttp2_frame_pack_headers(nghttp2_bufs *bufs, nghttp2_headers *frame,
  * This function always succeeds and returns 0.
  */
 int nghttp2_frame_unpack_headers_payload(nghttp2_headers *frame,
-                                         const uint8_t *payload,
-                                         size_t payloadlen);
+                                         const uint8_t *payload);
 
 /*
  * Packs PRIORITY frame |frame| in wire format and store it in
@@ -162,8 +163,7 @@ int nghttp2_frame_pack_priority(nghttp2_bufs *bufs, nghttp2_priority *frame);
  * Unpacks PRIORITY wire format into |frame|.
  */
 void nghttp2_frame_unpack_priority_payload(nghttp2_priority *frame,
-                                           const uint8_t *payload,
-                                           size_t payloadlen);
+                                           const uint8_t *payload);
 
 /*
  * Packs RST_STREAM frame |frame| in wire frame format and store it in
@@ -181,8 +181,7 @@ int nghttp2_frame_pack_rst_stream(nghttp2_bufs *bufs,
  * Unpacks RST_STREAM frame byte sequence into |frame|.
  */
 void nghttp2_frame_unpack_rst_stream_payload(nghttp2_rst_stream *frame,
-                                             const uint8_t *payload,
-                                             size_t payloadlen);
+                                             const uint8_t *payload);
 
 /*
  * Packs SETTINGS frame |frame| in wire format and store it in
@@ -273,8 +272,7 @@ int nghttp2_frame_pack_push_promise(nghttp2_bufs *bufs,
  *     TODO END_HEADERS flag is not set
  */
 int nghttp2_frame_unpack_push_promise_payload(nghttp2_push_promise *frame,
-                                              const uint8_t *payload,
-                                              size_t payloadlen);
+                                              const uint8_t *payload);
 
 /*
  * Packs PING frame |frame| in wire format and store it in
@@ -291,8 +289,7 @@ int nghttp2_frame_pack_ping(nghttp2_bufs *bufs, nghttp2_ping *frame);
  * Unpacks PING wire format into |frame|.
  */
 void nghttp2_frame_unpack_ping_payload(nghttp2_ping *frame,
-                                       const uint8_t *payload,
-                                       size_t payloadlen);
+                                       const uint8_t *payload);
 
 /*
  * Packs GOAWAY frame |frame| in wire format and store it in |bufs|.
@@ -321,7 +318,6 @@ int nghttp2_frame_pack_goaway(nghttp2_bufs *bufs, nghttp2_goaway *frame);
  */
 void nghttp2_frame_unpack_goaway_payload(nghttp2_goaway *frame,
                                          const uint8_t *payload,
-                                         size_t payloadlen,
                                          uint8_t *var_gift_payload,
                                          size_t var_gift_payloadlen);
 
@@ -356,8 +352,7 @@ int nghttp2_frame_pack_window_update(nghttp2_bufs *bufs,
  * Unpacks WINDOW_UPDATE frame byte sequence into |frame|.
  */
 void nghttp2_frame_unpack_window_update_payload(nghttp2_window_update *frame,
-                                                const uint8_t *payload,
-                                                size_t payloadlen);
+                                                const uint8_t *payload);
 
 /*
  * Packs ALTSVC frame |frame| in wire frame format and store it in
@@ -398,6 +393,36 @@ int nghttp2_frame_unpack_altsvc_payload2(nghttp2_extension *frame,
                                          const uint8_t *payload,
                                          size_t payloadlen, nghttp2_mem *mem);
 
+/*
+ * Packs ORIGIN frame |frame| in wire frame format and store it in
+ * |bufs|.
+ *
+ * The caller must make sure that nghttp2_bufs_reset(bufs) is called
+ * before calling this function.
+ *
+ * This function returns 0 if it succeeds, or one of the following
+ * negative error codes:
+ *
+ * NGHTTP2_ERR_FRAME_SIZE_ERROR
+ *     The length of the frame is too large.
+ */
+int nghttp2_frame_pack_origin(nghttp2_bufs *bufs, nghttp2_extension *ext);
+
+/*
+ * Unpacks ORIGIN wire format into |frame|.  The |payload| of length
+ * |payloadlen| contains the frame payload.
+ *
+ * This function returns 0 if it succeeds, or one of the following
+ * negative error codes:
+ *
+ * NGHTTP2_ERR_NOMEM
+ *     Out of memory.
+ * NGHTTP2_ERR_FRAME_SIZE_ERROR
+ *     The payload is too small.
+ */
+int nghttp2_frame_unpack_origin_payload(nghttp2_extension *frame,
+                                        const uint8_t *payload,
+                                        size_t payloadlen, nghttp2_mem *mem);
 /*
  * Initializes HEADERS frame |frame| with given values.  |frame| takes
  * ownership of |nva|, so caller must not free it. If |stream_id| is
@@ -494,6 +519,24 @@ void nghttp2_frame_altsvc_init(nghttp2_extension *frame, int32_t stream_id,
  * other fields must be allocated in the same buffer with origin.
  */
 void nghttp2_frame_altsvc_free(nghttp2_extension *frame, nghttp2_mem *mem);
+
+/*
+ * Initializes ORIGIN frame |frame| with given values.  This function
+ * assumes that frame->payload points to nghttp2_ext_origin object.
+ * Also |ov| and the memory pointed by the field of its elements are
+ * allocated in single buffer, starting with |ov|.  On success, this
+ * function takes ownership of |ov|, so caller must not free it.
+ */
+void nghttp2_frame_origin_init(nghttp2_extension *frame,
+                               nghttp2_origin_entry *ov, size_t nov);
+
+/*
+ * Frees up resources under |frame|.  This function does not free
+ * nghttp2_ext_origin object pointed by frame->payload.  This function
+ * only frees nghttp2_ext_origin.ov.  Therefore, other fields must be
+ * allocated in the same buffer with ov.
+ */
+void nghttp2_frame_origin_free(nghttp2_extension *frame, nghttp2_mem *mem);
 
 /*
  * Returns the number of padding bytes after payload.  The total

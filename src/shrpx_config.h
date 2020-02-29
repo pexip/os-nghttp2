@@ -29,14 +29,14 @@
 
 #include <sys/types.h>
 #ifdef HAVE_SYS_SOCKET_H
-#include <sys/socket.h>
+#  include <sys/socket.h>
 #endif // HAVE_SYS_SOCKET_H
 #include <sys/un.h>
 #ifdef HAVE_NETINET_IN_H
-#include <netinet/in.h>
+#  include <netinet/in.h>
 #endif // HAVE_NETINET_IN_H
 #ifdef HAVE_ARPA_INET_H
-#include <arpa/inet.h>
+#  include <arpa/inet.h>
 #endif // HAVE_ARPA_INET_H
 #include <cinttypes>
 #include <cstdio>
@@ -64,11 +64,11 @@ struct LogFragment;
 class ConnectBlocker;
 class Http2Session;
 
-namespace ssl {
+namespace tls {
 
 class CertLookupTree;
 
-} // namespace ssl
+} // namespace tls
 
 constexpr auto SHRPX_OPT_PRIVATE_KEY_FILE =
     StringRef::from_lit("private-key-file");
@@ -319,19 +319,86 @@ constexpr auto SHRPX_OPT_DNS_LOOKUP_TIMEOUT =
 constexpr auto SHRPX_OPT_DNS_MAX_TRY = StringRef::from_lit("dns-max-try");
 constexpr auto SHRPX_OPT_FRONTEND_KEEP_ALIVE_TIMEOUT =
     StringRef::from_lit("frontend-keep-alive-timeout");
+constexpr auto SHRPX_OPT_PSK_SECRETS = StringRef::from_lit("psk-secrets");
+constexpr auto SHRPX_OPT_CLIENT_PSK_SECRETS =
+    StringRef::from_lit("client-psk-secrets");
+constexpr auto SHRPX_OPT_CLIENT_NO_HTTP2_CIPHER_BLACK_LIST =
+    StringRef::from_lit("client-no-http2-cipher-black-list");
+constexpr auto SHRPX_OPT_CLIENT_CIPHERS = StringRef::from_lit("client-ciphers");
+constexpr auto SHRPX_OPT_ACCESSLOG_WRITE_EARLY =
+    StringRef::from_lit("accesslog-write-early");
+constexpr auto SHRPX_OPT_TLS_MIN_PROTO_VERSION =
+    StringRef::from_lit("tls-min-proto-version");
+constexpr auto SHRPX_OPT_TLS_MAX_PROTO_VERSION =
+    StringRef::from_lit("tls-max-proto-version");
+constexpr auto SHRPX_OPT_REDIRECT_HTTPS_PORT =
+    StringRef::from_lit("redirect-https-port");
+constexpr auto SHRPX_OPT_FRONTEND_MAX_REQUESTS =
+    StringRef::from_lit("frontend-max-requests");
+constexpr auto SHRPX_OPT_SINGLE_THREAD = StringRef::from_lit("single-thread");
+constexpr auto SHRPX_OPT_SINGLE_PROCESS = StringRef::from_lit("single-process");
+constexpr auto SHRPX_OPT_NO_ADD_X_FORWARDED_PROTO =
+    StringRef::from_lit("no-add-x-forwarded-proto");
+constexpr auto SHRPX_OPT_NO_STRIP_INCOMING_X_FORWARDED_PROTO =
+    StringRef::from_lit("no-strip-incoming-x-forwarded-proto");
+constexpr auto SHRPX_OPT_OCSP_STARTUP = StringRef::from_lit("ocsp-startup");
+constexpr auto SHRPX_OPT_NO_VERIFY_OCSP = StringRef::from_lit("no-verify-ocsp");
+constexpr auto SHRPX_OPT_VERIFY_CLIENT_TOLERATE_EXPIRED =
+    StringRef::from_lit("verify-client-tolerate-expired");
+constexpr auto SHRPX_OPT_IGNORE_PER_PATTERN_MRUBY_ERROR =
+    StringRef::from_lit("ignore-per-pattern-mruby-error");
+constexpr auto SHRPX_OPT_TLS_NO_POSTPONE_EARLY_DATA =
+    StringRef::from_lit("tls-no-postpone-early-data");
+constexpr auto SHRPX_OPT_TLS_MAX_EARLY_DATA =
+    StringRef::from_lit("tls-max-early-data");
+constexpr auto SHRPX_OPT_TLS13_CIPHERS = StringRef::from_lit("tls13-ciphers");
+constexpr auto SHRPX_OPT_TLS13_CLIENT_CIPHERS =
+    StringRef::from_lit("tls13-client-ciphers");
+constexpr auto SHRPX_OPT_NO_STRIP_INCOMING_EARLY_DATA =
+    StringRef::from_lit("no-strip-incoming-early-data");
 
 constexpr size_t SHRPX_OBFUSCATED_NODE_LENGTH = 8;
 
 constexpr char DEFAULT_DOWNSTREAM_HOST[] = "127.0.0.1";
 constexpr int16_t DEFAULT_DOWNSTREAM_PORT = 80;
 
-enum shrpx_proto { PROTO_NONE, PROTO_HTTP1, PROTO_HTTP2, PROTO_MEMCACHED };
+enum class Proto {
+  NONE,
+  HTTP1,
+  HTTP2,
+  MEMCACHED,
+};
 
-enum shrpx_session_affinity {
+enum class SessionAffinity {
   // No session affinity
-  AFFINITY_NONE,
+  NONE,
   // Client IP affinity
-  AFFINITY_IP,
+  IP,
+  // Cookie based affinity
+  COOKIE,
+};
+
+enum class SessionAffinityCookieSecure {
+  // Secure attribute of session affinity cookie is determined by the
+  // request scheme.
+  AUTO,
+  // Secure attribute of session affinity cookie is always set.
+  YES,
+  // Secure attribute of session affinity cookie is always unset.
+  NO,
+};
+
+struct AffinityConfig {
+  // Type of session affinity.
+  SessionAffinity type;
+  struct {
+    // Name of a cookie to use.
+    StringRef name;
+    // Path which a cookie is applied to.
+    StringRef path;
+    // Secure attribute
+    SessionAffinityCookieSecure secure;
+  } cookie;
 };
 
 enum shrpx_forwarded_param {
@@ -342,9 +409,9 @@ enum shrpx_forwarded_param {
   FORWARDED_PROTO = 0x8,
 };
 
-enum shrpx_forwarded_node_type {
-  FORWARDED_NODE_OBFUSCATED,
-  FORWARDED_NODE_IP,
+enum class ForwardedNode {
+  OBFUSCATED,
+  IP,
 };
 
 struct AltSvc {
@@ -353,13 +420,13 @@ struct AltSvc {
   uint16_t port;
 };
 
-enum UpstreamAltMode {
+enum class UpstreamAltMode {
   // No alternative mode
-  ALTMODE_NONE,
+  NONE,
   // API processing mode
-  ALTMODE_API,
+  API,
   // Health monitor mode
-  ALTMODE_HEALTHMON,
+  HEALTHMON,
 };
 
 struct UpstreamAddr {
@@ -377,11 +444,16 @@ struct UpstreamAddr {
   // domain socket, this is 0.
   int family;
   // Alternate mode
-  int alt_mode;
+  UpstreamAltMode alt_mode;
   // true if |host| contains UNIX domain socket path.
   bool host_unix;
   // true if TLS is enabled.
   bool tls;
+  // true if SNI host should be used as a host when selecting backend
+  // server.
+  bool sni_fwd;
+  // true if client is supposed to send PROXY protocol v1 header.
+  bool accept_proxy_protocol;
   int fd;
 };
 
@@ -399,7 +471,7 @@ struct DownstreamAddrConfig {
   size_t fall;
   size_t rise;
   // Application protocol used in this group
-  shrpx_proto proto;
+  Proto proto;
   // backend port.  0 if |host_unix| is true.
   uint16_t port;
   // true if |host| contains UNIX domain socket path.
@@ -407,6 +479,10 @@ struct DownstreamAddrConfig {
   bool tls;
   // true if dynamic DNS is enabled
   bool dns;
+  // true if :scheme pseudo header field should be upgraded to secure
+  // variant (e.g., "https") when forwarding request to a backend
+  // connected by TLS connection.
+  bool upgrade_scheme;
 };
 
 // Mapping hash to idx which is an index into
@@ -420,15 +496,26 @@ struct AffinityHash {
 
 struct DownstreamAddrGroupConfig {
   DownstreamAddrGroupConfig(const StringRef &pattern)
-      : pattern(pattern), affinity(AFFINITY_NONE) {}
+      : pattern(pattern),
+        affinity{SessionAffinity::NONE},
+        redirect_if_not_tls(false) {}
 
   StringRef pattern;
+  StringRef mruby_file;
   std::vector<DownstreamAddrConfig> addrs;
   // Bunch of session affinity hash.  Only used if affinity ==
-  // AFFINITY_IP.
+  // SessionAffinity::IP.
   std::vector<AffinityHash> affinity_hash;
-  // Session affinity
-  shrpx_session_affinity affinity;
+  // Cookie based session affinity configuration.
+  AffinityConfig affinity;
+  // true if this group requires that client connection must be TLS,
+  // and the request must be redirected to https URI.
+  bool redirect_if_not_tls;
+  // Timeouts for backend connection.
+  struct {
+    ev_tstamp read;
+    ev_tstamp write;
+  } timeout;
 };
 
 struct TicketKey {
@@ -531,6 +618,8 @@ struct TLSConfig {
     ev_tstamp update_interval;
     StringRef fetch_ocsp_response_file;
     bool disabled;
+    bool startup;
+    bool no_verify;
   } ocsp;
 
   // Client verification configurations
@@ -539,14 +628,28 @@ struct TLSConfig {
     // certificate validation
     StringRef cacert;
     bool enabled;
+    // true if we accept an expired client certificate.
+    bool tolerate_expired;
   } client_verify;
 
-  // Client private key and certificate used in backend connections.
+  // Client (backend connection) TLS configuration.
   struct {
+    // Client PSK configuration
+    struct {
+      // identity must be NULL terminated string.
+      StringRef identity;
+      StringRef secret;
+    } psk;
     StringRef private_key_file;
     StringRef cert_file;
+    StringRef ciphers;
+    StringRef tls13_ciphers;
+    bool no_http2_cipher_black_list;
   } client;
 
+  // PSK secrets.  The key is identity, and the associated value is
+  // its secret.
+  std::map<StringRef, StringRef> psk_secrets;
   // The list of additional TLS certificate pair
   std::vector<TLSCertificate> subcerts;
   std::vector<unsigned char> alpn_prefs;
@@ -567,10 +670,20 @@ struct TLSConfig {
   StringRef cert_file;
   StringRef dh_param_file;
   StringRef ciphers;
+  StringRef tls13_ciphers;
   StringRef ecdh_curves;
   StringRef cacert;
+  // The maximum amount of 0-RTT data that server accepts.
+  uint32_t max_early_data;
+  // The minimum and maximum TLS version.  These values are defined in
+  // OpenSSL header file.
+  int min_proto_version;
+  int max_proto_version;
   bool insecure;
   bool no_http2_cipher_black_list;
+  // true if forwarding requests included in TLS early data should not
+  // be postponed until TLS handshake finishes.
+  bool no_postpone_early_data;
 };
 
 // custom error page
@@ -591,25 +704,36 @@ struct HttpConfig {
     uint32_t params;
     // type of value recorded in "by" parameter of Forwarded header
     // field.
-    shrpx_forwarded_node_type by_node_type;
+    ForwardedNode by_node_type;
     // type of value recorded in "for" parameter of Forwarded header
     // field.
-    shrpx_forwarded_node_type for_node_type;
+    ForwardedNode for_node_type;
     bool strip_incoming;
   } forwarded;
   struct {
     bool add;
     bool strip_incoming;
   } xff;
+  struct {
+    bool add;
+    bool strip_incoming;
+  } xfp;
+  struct {
+    bool strip_incoming;
+  } early_data;
   std::vector<AltSvc> altsvcs;
   std::vector<ErrorPage> error_pages;
   HeaderRefs add_request_headers;
   HeaderRefs add_response_headers;
   StringRef server_name;
+  // Port number which appears in Location header field when https
+  // redirect is made.
+  StringRef redirect_https_port;
   size_t request_header_field_buffer;
   size_t max_request_header_fields;
   size_t response_header_field_buffer;
   size_t max_response_header_fields;
+  size_t max_requests;
   bool no_via;
   bool no_location_rewrite;
   bool no_host_rewrite;
@@ -667,6 +791,9 @@ struct LoggingConfig {
     StringRef file;
     // Send accesslog to syslog, ignoring accesslog_file.
     bool syslog;
+    // Write accesslog when response headers are received from
+    // backend, rather than response body is received and sent.
+    bool write_early;
   } access;
   struct {
     StringRef file;
@@ -775,6 +902,7 @@ struct ConnectionConfig {
       RateLimitConfig write;
     } ratelimit;
     size_t worker_connections;
+    // Deprecated.  See UpstreamAddr.accept_proxy_protocol.
     bool accept_proxy_protocol;
   } upstream;
 
@@ -809,6 +937,7 @@ struct Config {
         conn{},
         api{},
         dns{},
+        config_revision{0},
         num_worker{0},
         padding{0},
         rlimit_nofile{0},
@@ -818,6 +947,9 @@ struct Config {
         verbose{false},
         daemon{false},
         http2_proxy{false},
+        single_process{false},
+        single_thread{false},
+        ignore_per_pattern_mruby_error{false},
         ev_loop_flags{0} {}
   ~Config();
 
@@ -842,6 +974,13 @@ struct Config {
   StringRef conf_path;
   StringRef user;
   StringRef mruby_file;
+  // The revision of configuration which is opaque string, and changes
+  // on each configuration reloading.  This does not change on
+  // backendconfig API call.  This value is returned in health check
+  // as "nghttpx-conf-rev" response header field.  The external
+  // program can check this value to know whether reloading has
+  // completed or not.
+  uint64_t config_revision;
   size_t num_worker;
   size_t padding;
   size_t rlimit_nofile;
@@ -851,6 +990,12 @@ struct Config {
   bool verbose;
   bool daemon;
   bool http2_proxy;
+  // Run nghttpx in single process mode.  With this mode, signal
+  // handling is omitted.
+  bool single_process;
+  bool single_thread;
+  // Ignore mruby compile error for per-pattern mruby script.
+  bool ignore_per_pattern_mruby_error;
   // flags passed to ev_default_loop() and ev_loop_new()
   int ev_loop_flags;
 };
@@ -868,6 +1013,7 @@ enum {
   SHRPX_OPTID_ACCESSLOG_FILE,
   SHRPX_OPTID_ACCESSLOG_FORMAT,
   SHRPX_OPTID_ACCESSLOG_SYSLOG,
+  SHRPX_OPTID_ACCESSLOG_WRITE_EARLY,
   SHRPX_OPTID_ADD_FORWARDED,
   SHRPX_OPTID_ADD_REQUEST_HEADER,
   SHRPX_OPTID_ADD_RESPONSE_HEADER,
@@ -909,8 +1055,11 @@ enum {
   SHRPX_OPTID_CIPHERS,
   SHRPX_OPTID_CLIENT,
   SHRPX_OPTID_CLIENT_CERT_FILE,
+  SHRPX_OPTID_CLIENT_CIPHERS,
+  SHRPX_OPTID_CLIENT_NO_HTTP2_CIPHER_BLACK_LIST,
   SHRPX_OPTID_CLIENT_PRIVATE_KEY_FILE,
   SHRPX_OPTID_CLIENT_PROXY,
+  SHRPX_OPTID_CLIENT_PSK_SECRETS,
   SHRPX_OPTID_CONF,
   SHRPX_OPTID_DAEMON,
   SHRPX_OPTID_DH_PARAM_FILE,
@@ -941,6 +1090,7 @@ enum {
   SHRPX_OPTID_FRONTEND_HTTP2_WINDOW_BITS,
   SHRPX_OPTID_FRONTEND_HTTP2_WINDOW_SIZE,
   SHRPX_OPTID_FRONTEND_KEEP_ALIVE_TIMEOUT,
+  SHRPX_OPTID_FRONTEND_MAX_REQUESTS,
   SHRPX_OPTID_FRONTEND_NO_TLS,
   SHRPX_OPTID_FRONTEND_READ_TIMEOUT,
   SHRPX_OPTID_FRONTEND_WRITE_TIMEOUT,
@@ -950,6 +1100,7 @@ enum {
   SHRPX_OPTID_HTTP2_MAX_CONCURRENT_STREAMS,
   SHRPX_OPTID_HTTP2_NO_COOKIE_CRUMBLING,
   SHRPX_OPTID_HTTP2_PROXY,
+  SHRPX_OPTID_IGNORE_PER_PATTERN_MRUBY_ERROR,
   SHRPX_OPTID_INCLUDE,
   SHRPX_OPTID_INSECURE,
   SHRPX_OPTID_LISTENER_DISABLE_TIMEOUT,
@@ -958,6 +1109,7 @@ enum {
   SHRPX_OPTID_MAX_REQUEST_HEADER_FIELDS,
   SHRPX_OPTID_MAX_RESPONSE_HEADER_FIELDS,
   SHRPX_OPTID_MRUBY_FILE,
+  SHRPX_OPTID_NO_ADD_X_FORWARDED_PROTO,
   SHRPX_OPTID_NO_HOST_REWRITE,
   SHRPX_OPTID_NO_HTTP2_CIPHER_BLACK_LIST,
   SHRPX_OPTID_NO_KQUEUE,
@@ -965,19 +1117,27 @@ enum {
   SHRPX_OPTID_NO_OCSP,
   SHRPX_OPTID_NO_SERVER_PUSH,
   SHRPX_OPTID_NO_SERVER_REWRITE,
+  SHRPX_OPTID_NO_STRIP_INCOMING_EARLY_DATA,
+  SHRPX_OPTID_NO_STRIP_INCOMING_X_FORWARDED_PROTO,
+  SHRPX_OPTID_NO_VERIFY_OCSP,
   SHRPX_OPTID_NO_VIA,
   SHRPX_OPTID_NPN_LIST,
+  SHRPX_OPTID_OCSP_STARTUP,
   SHRPX_OPTID_OCSP_UPDATE_INTERVAL,
   SHRPX_OPTID_PADDING,
   SHRPX_OPTID_PID_FILE,
   SHRPX_OPTID_PRIVATE_KEY_FILE,
   SHRPX_OPTID_PRIVATE_KEY_PASSWD_FILE,
+  SHRPX_OPTID_PSK_SECRETS,
   SHRPX_OPTID_READ_BURST,
   SHRPX_OPTID_READ_RATE,
+  SHRPX_OPTID_REDIRECT_HTTPS_PORT,
   SHRPX_OPTID_REQUEST_HEADER_FIELD_BUFFER,
   SHRPX_OPTID_RESPONSE_HEADER_FIELD_BUFFER,
   SHRPX_OPTID_RLIMIT_NOFILE,
   SHRPX_OPTID_SERVER_NAME,
+  SHRPX_OPTID_SINGLE_PROCESS,
+  SHRPX_OPTID_SINGLE_THREAD,
   SHRPX_OPTID_STREAM_READ_TIMEOUT,
   SHRPX_OPTID_STREAM_WRITE_TIMEOUT,
   SHRPX_OPTID_STRIP_INCOMING_FORWARDED,
@@ -986,6 +1146,10 @@ enum {
   SHRPX_OPTID_SYSLOG_FACILITY,
   SHRPX_OPTID_TLS_DYN_REC_IDLE_TIMEOUT,
   SHRPX_OPTID_TLS_DYN_REC_WARMUP_THRESHOLD,
+  SHRPX_OPTID_TLS_MAX_EARLY_DATA,
+  SHRPX_OPTID_TLS_MAX_PROTO_VERSION,
+  SHRPX_OPTID_TLS_MIN_PROTO_VERSION,
+  SHRPX_OPTID_TLS_NO_POSTPONE_EARLY_DATA,
   SHRPX_OPTID_TLS_PROTO_LIST,
   SHRPX_OPTID_TLS_SCT_DIR,
   SHRPX_OPTID_TLS_SESSION_CACHE_MEMCACHED,
@@ -1003,9 +1167,12 @@ enum {
   SHRPX_OPTID_TLS_TICKET_KEY_MEMCACHED_MAX_RETRY,
   SHRPX_OPTID_TLS_TICKET_KEY_MEMCACHED_PRIVATE_KEY_FILE,
   SHRPX_OPTID_TLS_TICKET_KEY_MEMCACHED_TLS,
+  SHRPX_OPTID_TLS13_CIPHERS,
+  SHRPX_OPTID_TLS13_CLIENT_CIPHERS,
   SHRPX_OPTID_USER,
   SHRPX_OPTID_VERIFY_CLIENT,
   SHRPX_OPTID_VERIFY_CLIENT_CACERT,
+  SHRPX_OPTID_VERIFY_CLIENT_TOLERATE_EXPIRED,
   SHRPX_OPTID_WORKER_FRONTEND_CONNECTIONS,
   SHRPX_OPTID_WORKER_READ_BURST,
   SHRPX_OPTID_WORKER_READ_RATE,
@@ -1024,20 +1191,26 @@ int option_lookup_token(const char *name, size_t namelen);
 // stored into the object pointed by |config|. This function returns 0
 // if it succeeds, or -1.  The |included_set| contains the all paths
 // already included while processing this configuration, to avoid loop
-// in --include option.
+// in --include option.  The |pattern_addr_indexer| contains a pair of
+// pattern of backend, and its index in DownstreamConfig::addr_groups.
+// It is introduced to speed up loading configuration file with lots
+// of backends.
 int parse_config(Config *config, const StringRef &opt, const StringRef &optarg,
-                 std::set<StringRef> &included_set);
+                 std::set<StringRef> &included_set,
+                 std::map<StringRef, size_t> &pattern_addr_indexer);
 
 // Similar to parse_config() above, but additional |optid| which
 // should be the return value of option_lookup_token(opt).
 int parse_config(Config *config, int optid, const StringRef &opt,
-                 const StringRef &optarg, std::set<StringRef> &included_set);
+                 const StringRef &optarg, std::set<StringRef> &included_set,
+                 std::map<StringRef, size_t> &pattern_addr_indexer);
 
 // Loads configurations from |filename| and stores them in |config|.
 // This function returns 0 if it succeeds, or -1.  See parse_config()
 // for |include_set|.
 int load_config(Config *config, const char *filename,
-                std::set<StringRef> &include_set);
+                std::set<StringRef> &include_set,
+                std::map<StringRef, size_t> &pattern_addr_indexer);
 
 // Parses header field in |optarg|.  We expect header field is formed
 // like "NAME: VALUE".  We require that NAME is non empty string.  ":"
@@ -1066,7 +1239,7 @@ read_tls_ticket_key_file(const std::vector<StringRef> &files,
                          const EVP_CIPHER *cipher, const EVP_MD *hmac);
 
 // Returns string representation of |proto|.
-StringRef strproto(shrpx_proto proto);
+StringRef strproto(Proto proto);
 
 int configure_downstream_group(Config *config, bool http2_proxy,
                                bool numeric_addr_only,

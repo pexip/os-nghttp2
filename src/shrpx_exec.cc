@@ -27,6 +27,7 @@
 #include <cerrno>
 
 #include "shrpx_signal.h"
+#include "shrpx_log.h"
 #include "util.h"
 #include "template.h"
 
@@ -75,15 +76,18 @@ int exec_read_command(Process &proc, char *const argv[]) {
   auto pid = fork();
 
   if (pid == 0) {
+    // This is multithreaded program, and we are allowed to use only
+    // async-signal-safe functions here.
+
     // child process
     shrpx_signal_unset_worker_proc_ign_handler();
 
     rv = shrpx_signal_unblock_all();
     if (rv != 0) {
-      auto error = errno;
-      LOG(FATAL) << "Unblocking all signals failed: errno=" << error;
-
-      _Exit(EXIT_FAILURE);
+      static constexpr char msg[] = "Unblocking all signals failed\n";
+      while (write(STDERR_FILENO, msg, str_size(msg)) == -1 && errno == EINTR)
+        ;
+      nghttp2_Exit(EXIT_FAILURE);
     }
 
     dup2(pfd[1], 1);
@@ -91,10 +95,10 @@ int exec_read_command(Process &proc, char *const argv[]) {
 
     rv = execv(argv[0], argv);
     if (rv == -1) {
-      auto error = errno;
-      LOG(ERROR) << "Could not execute command: " << argv[0]
-                 << ", execve() faild, errno=" << error;
-      _Exit(EXIT_FAILURE);
+      static constexpr char msg[] = "Could not execute command\n";
+      while (write(STDERR_FILENO, msg, str_size(msg)) == -1 && errno == EINTR)
+        ;
+      nghttp2_Exit(EXIT_FAILURE);
     }
     // unreachable
   }
@@ -111,7 +115,7 @@ int exec_read_command(Process &proc, char *const argv[]) {
     auto error = errno;
     LOG(FATAL) << "Restoring all signals failed: errno=" << error;
 
-    _Exit(EXIT_FAILURE);
+    nghttp2_Exit(EXIT_FAILURE);
   }
 
   if (pid == -1) {

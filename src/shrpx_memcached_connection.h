@@ -33,7 +33,7 @@
 #include <ev.h>
 
 #include "shrpx_connection.h"
-#include "shrpx_ssl.h"
+#include "shrpx_tls.h"
 #include "shrpx_connect_blocker.h"
 #include "buffer.h"
 #include "network.h"
@@ -43,15 +43,17 @@ using namespace nghttp2;
 namespace shrpx {
 
 struct MemcachedRequest;
+enum class MemcachedOp : uint8_t;
+enum class MemcachedStatusCode : uint16_t;
 
-enum {
-  MEMCACHED_PARSE_HEADER24,
-  MEMCACHED_PARSE_EXTRA,
-  MEMCACHED_PARSE_VALUE,
+enum class MemcachedParseState {
+  HEADER24,
+  EXTRA,
+  VALUE,
 };
 
 // Stores state when parsing response from memcached server
-struct MemcachedParseState {
+struct MemcachedParseContext {
   // Buffer for value, dynamically allocated.
   std::vector<uint8_t> value;
   // cas in response
@@ -66,11 +68,11 @@ struct MemcachedParseState {
   // Number of bytes left to read variable length field.
   size_t read_left;
   // Parser state; see enum above
-  int state;
+  MemcachedParseState state;
   // status_code in response
-  int status_code;
+  MemcachedStatusCode status_code;
   // op in response
-  int op;
+  MemcachedOp op;
 };
 
 struct MemcachedSendbuf {
@@ -136,9 +138,9 @@ private:
   std::deque<MemcachedSendbuf> sendbufv_;
   std::function<int(MemcachedConnection &)> do_read_, do_write_;
   StringRef sni_name_;
-  ssl::TLSSessionCache tls_session_cache_;
+  tls::TLSSessionCache tls_session_cache_;
   ConnectBlocker connect_blocker_;
-  MemcachedParseState parse_state_;
+  MemcachedParseContext parse_state_;
   const Address *addr_;
   SSL_CTX *ssl_ctx_;
   // Sum of the bytes to be transmitted in sendbufv_.

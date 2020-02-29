@@ -27,12 +27,12 @@
 #include <getopt.h>
 #include <signal.h>
 #ifdef HAVE_NETINET_IN_H
-#include <netinet/in.h>
+#  include <netinet/in.h>
 #endif // HAVE_NETINET_IN_H
 #include <netinet/tcp.h>
 #include <sys/stat.h>
 #ifdef HAVE_FCNTL_H
-#include <fcntl.h>
+#  include <fcntl.h>
 #endif // HAVE_FCNTL_H
 
 #include <cstdio>
@@ -46,26 +46,19 @@
 #include <future>
 #include <random>
 
-#ifdef HAVE_SPDYLAY
-#include <spdylay/spdylay.h>
-#endif // HAVE_SPDYLAY
-
 #include <openssl/err.h>
 
 #include "http-parser/http_parser.h"
 
 #include "h2load_http1_session.h"
 #include "h2load_http2_session.h"
-#ifdef HAVE_SPDYLAY
-#include "h2load_spdy_session.h"
-#endif // HAVE_SPDYLAY
-#include "ssl.h"
+#include "tls.h"
 #include "http2.h"
 #include "util.h"
 #include "template.h"
 
 #ifndef O_BINARY
-#define O_BINARY (0)
+#  define O_BINARY (0)
 #endif // O_BINARY
 
 using namespace nghttp2;
@@ -79,7 +72,8 @@ bool recorded(const std::chrono::steady_clock::time_point &t) {
 } // namespace
 
 Config::Config()
-    : data_length(-1),
+    : ciphers(tls::DEFAULT_CIPHER_LIST),
+      data_length(-1),
       addrs(nullptr),
       nreqs(1),
       nclients(1),
@@ -89,12 +83,15 @@ Config::Config()
       connection_window_bits(30),
       rate(0),
       rate_period(1.0),
+      duration(0.0),
+      warm_up_time(0.0),
       conn_active_timeout(0.),
       conn_inactivity_timeout(0.),
       no_tls_proto(PROTO_HTTP2),
       header_table_size(4_k),
       encoder_header_table_size(4_k),
       data_fd(-1),
+      log_fd(-1),
       port(0),
       default_port(0),
       verbose(false),
@@ -117,6 +114,7 @@ Config::~Config() {
 }
 
 bool Config::is_rate_mode() const { return (this->rate != 0); }
+bool Config::is_timing_based_mode() const { return (this->duration > 0); }
 bool Config::has_base_uri() const { return (!this->base_uri.empty()); }
 Config config;
 
@@ -150,31 +148,10 @@ std::mt19937 gen(rd());
 } // namespace
 
 namespace {
-void sampling_init(Sampling &smp, size_t total, size_t max_samples) {
+void sampling_init(Sampling &smp, size_t max_samples) {
   smp.n = 0;
-
-  if (total <= max_samples) {
-    smp.interval = 0.;
-    smp.point = 0.;
-    return;
-  }
-
-  smp.interval = static_cast<double>(total) / max_samples;
-
-  std::uniform_real_distribution<> dis(0., smp.interval);
-
-  smp.point = dis(gen);
+  smp.max_samples = max_samples;
 }
-} // namespace
-
-namespace {
-bool sampling_should_pick(Sampling &smp) {
-  return smp.interval == 0. || smp.n == ceil(smp.point);
-}
-} // namespace
-
-namespace {
-void sampling_advance_point(Sampling &smp) { smp.point += smp.interval; }
 } // namespace
 
 namespace {
@@ -189,6 +166,7 @@ void writecb(struct ev_loop *loop, ev_io *w, int revents) {
     rv = client->connect();
     if (rv != 0) {
       client->fail();
+      client->worker->free_client(client);
       delete client;
       return;
     }
@@ -196,6 +174,7 @@ void writecb(struct ev_loop *loop, ev_io *w, int revents) {
   }
   if (rv != 0) {
     client->fail();
+    client->worker->free_client(client);
     delete client;
   }
 }
@@ -209,6 +188,7 @@ void readcb(struct ev_loop *loop, ev_io *w, int revents) {
     if (client->try_again_or_fail() == 0) {
       return;
     }
+    client->worker->free_client(client);
     delete client;
     return;
   }
@@ -232,7 +212,7 @@ void rate_period_timeout_w_cb(struct ev_loop *loop, ev_timer *w, int revents) {
       --worker->nreqs_rem;
     }
     auto client =
-        make_unique<Client>(worker->next_client_id++, worker, req_todo);
+        std::make_unique<Client>(worker->next_client_id++, worker, req_todo);
 
     ++worker->nconns_made;
 
@@ -240,13 +220,68 @@ void rate_period_timeout_w_cb(struct ev_loop *loop, ev_timer *w, int revents) {
       std::cerr << "client could not connect to host" << std::endl;
       client->fail();
     } else {
-      client.release();
+      if (worker->config->is_timing_based_mode()) {
+        worker->clients.push_back(client.release());
+      } else {
+        client.release();
+      }
     }
     worker->report_rate_progress();
   }
-  if (worker->nconns_made >= worker->nclients) {
-    ev_timer_stop(worker->loop, w);
+  if (!worker->config->is_timing_based_mode()) {
+    if (worker->nconns_made >= worker->nclients) {
+      ev_timer_stop(worker->loop, w);
+    }
+  } else {
+    // To check whether all created clients are pushed correctly
+    assert(worker->nclients == worker->clients.size());
   }
+}
+} // namespace
+
+namespace {
+// Called when the duration for infinite number of requests are over
+void duration_timeout_cb(struct ev_loop *loop, ev_timer *w, int revents) {
+  auto worker = static_cast<Worker *>(w->data);
+
+  worker->current_phase = Phase::DURATION_OVER;
+
+  std::cout << "Main benchmark duration is over for thread #" << worker->id
+            << ". Stopping all clients." << std::endl;
+  worker->stop_all_clients();
+  std::cout << "Stopped all clients for thread #" << worker->id << std::endl;
+}
+} // namespace
+
+namespace {
+// Called when the warmup duration for infinite number of requests are over
+void warmup_timeout_cb(struct ev_loop *loop, ev_timer *w, int revents) {
+  auto worker = static_cast<Worker *>(w->data);
+
+  std::cout << "Warm-up phase is over for thread #" << worker->id << "."
+            << std::endl;
+  std::cout << "Main benchmark duration is started for thread #" << worker->id
+            << "." << std::endl;
+  assert(worker->stats.req_started == 0);
+  assert(worker->stats.req_done == 0);
+
+  for (auto client : worker->clients) {
+    if (client) {
+      assert(client->req_todo == 0);
+      assert(client->req_left == 1);
+      assert(client->req_inflight == 0);
+      assert(client->req_started == 0);
+      assert(client->req_done == 0);
+
+      client->record_client_start_time();
+      client->clear_connect_times();
+      client->record_connect_start_time();
+    }
+  }
+
+  worker->current_phase = Phase::MAIN_DURATION;
+
+  ev_timer_start(worker->loop, &worker->duration_watcher);
 }
 } // namespace
 
@@ -268,10 +303,7 @@ void conn_timeout_cb(EV_P_ ev_timer *w, int revents) {
 
 namespace {
 bool check_stop_client_request_timeout(Client *client, ev_timer *w) {
-  auto nreq = client->req_todo - client->req_started;
-
-  if (nreq == 0 ||
-      client->streams.size() >= client->session->max_concurrent_streams()) {
+  if (client->req_left == 0) {
     // no more requests to make, stop timer
     ev_timer_stop(client->worker->loop, w);
     return true;
@@ -284,6 +316,11 @@ bool check_stop_client_request_timeout(Client *client, ev_timer *w) {
 namespace {
 void client_request_timeout_cb(struct ev_loop *loop, ev_timer *w, int revents) {
   auto client = static_cast<Client *>(w->data);
+
+  if (client->streams.size() >= (size_t)config.max_concurrent_streams) {
+    ev_timer_stop(client->worker->loop, w);
+    return;
+  }
 
   if (client->submit_request() != 0) {
     ev_timer_stop(client->worker->loop, w);
@@ -329,12 +366,19 @@ Client::Client(uint32_t id, Worker *worker, size_t req_todo)
       reqidx(0),
       state(CLIENT_IDLE),
       req_todo(req_todo),
+      req_left(req_todo),
+      req_inflight(0),
       req_started(0),
       req_done(0),
       id(id),
       fd(-1),
       new_connection_requested(false),
       final(false) {
+  if (req_todo == 0) { // this means infinite number of requests are to be made
+    // This ensures that number of requests are unbounded
+    // Just a positive number is fine, we chose the first positive number
+    req_left = 1;
+  }
   ev_io_init(&wev, writecb, 0, EV_WRITE);
   ev_io_init(&rev, readcb, 0, EV_READ);
 
@@ -360,10 +404,7 @@ Client::~Client() {
     SSL_free(ssl);
   }
 
-  if (sampling_should_pick(worker->client_smp)) {
-    sampling_advance_point(worker->client_smp);
-    worker->sample_client_stat(&cstat);
-  }
+  worker->sample_client_stat(&cstat);
   ++worker->client_smp.n;
 }
 
@@ -406,9 +447,17 @@ int Client::make_socket(addrinfo *addr) {
 int Client::connect() {
   int rv;
 
-  record_client_start_time();
-  clear_connect_times();
-  record_connect_start_time();
+  if (!worker->config->is_timing_based_mode() ||
+      worker->current_phase == Phase::MAIN_DURATION) {
+    record_client_start_time();
+    clear_connect_times();
+    record_connect_start_time();
+  } else if (worker->current_phase == Phase::INITIAL_IDLE) {
+    worker->current_phase = Phase::WARM_UP;
+    std::cout << "Warm-up started for thread #" << worker->id << "."
+              << std::endl;
+    ev_timer_start(worker->loop, &worker->warmup_watcher);
+  }
 
   if (worker->config->conn_inactivity_timeout > 0.) {
     ev_timer_again(worker->loop, &conn_inactivity_watcher);
@@ -466,16 +515,17 @@ int Client::try_again_or_fail() {
 
   if (new_connection_requested) {
     new_connection_requested = false;
-    if (req_started < req_todo) {
-      // At the moment, we don't have a facility to re-start request
-      // already in in-flight.  Make them fail.
-      auto req_abandoned = req_started - req_done;
 
-      worker->stats.req_failed += req_abandoned;
-      worker->stats.req_error += req_abandoned;
-      worker->stats.req_done += req_abandoned;
+    if (req_left) {
 
-      req_done = req_started;
+      if (worker->current_phase == Phase::MAIN_DURATION) {
+        // At the moment, we don't have a facility to re-start request
+        // already in in-flight.  Make them fail.
+        worker->stats.req_failed += req_inflight;
+        worker->stats.req_error += req_inflight;
+
+        req_inflight = 0;
+      }
 
       // Keep using current address
       if (connect() == 0) {
@@ -509,7 +559,7 @@ void Client::disconnect() {
   ev_io_stop(worker->loop, &wev);
   ev_io_stop(worker->loop, &rev);
   if (ssl) {
-    SSL_set_shutdown(ssl, SSL_RECEIVED_SHUTDOWN);
+    SSL_set_shutdown(ssl, SSL_get_shutdown(ssl) | SSL_RECEIVED_SHUTDOWN);
     ERR_clear_error();
 
     if (SSL_shutdown(ssl) != 1) {
@@ -527,16 +577,23 @@ void Client::disconnect() {
 }
 
 int Client::submit_request() {
-  ++worker->stats.req_started;
   if (session->submit_request() != 0) {
     return -1;
   }
 
-  ++req_started;
+  if (worker->current_phase != Phase::MAIN_DURATION) {
+    return 0;
+  }
 
+  ++worker->stats.req_started;
+  ++req_started;
+  ++req_inflight;
+  if (!worker->config->is_timing_based_mode()) {
+    --req_left;
+  }
   // if an active timeout is set and this is the last request to be submitted
   // on this connection, start the active timeout.
-  if (worker->config->conn_active_timeout > 0. && req_started >= req_todo) {
+  if (worker->config->conn_active_timeout > 0. && req_left == 0) {
     ev_timer_start(worker->loop, &conn_active_watcher);
   }
 
@@ -544,41 +601,51 @@ int Client::submit_request() {
 }
 
 void Client::process_timedout_streams() {
-  for (auto &req_stat : worker->stats.req_stats) {
+  if (worker->current_phase != Phase::MAIN_DURATION) {
+    return;
+  }
+
+  for (auto &p : streams) {
+    auto &req_stat = p.second.req_stat;
     if (!req_stat.completed) {
       req_stat.stream_close_time = std::chrono::steady_clock::now();
     }
   }
 
-  auto req_timed_out = req_todo - req_done;
-  worker->stats.req_timedout += req_timed_out;
+  worker->stats.req_timedout += req_inflight;
 
   process_abandoned_streams();
 }
 
 void Client::process_abandoned_streams() {
-  auto req_abandoned = req_todo - req_done;
+  if (worker->current_phase != Phase::MAIN_DURATION) {
+    return;
+  }
+
+  auto req_abandoned = req_inflight + req_left;
 
   worker->stats.req_failed += req_abandoned;
   worker->stats.req_error += req_abandoned;
-  worker->stats.req_done += req_abandoned;
 
-  req_done = req_todo;
+  req_inflight = 0;
+  req_left = 0;
 }
 
 void Client::process_request_failure() {
-  auto req_abandoned = req_todo - req_started;
-
-  worker->stats.req_failed += req_abandoned;
-  worker->stats.req_error += req_abandoned;
-  worker->stats.req_done += req_abandoned;
-
-  req_done += req_abandoned;
-
-  if (req_done == req_todo) {
-    terminate_session();
+  if (worker->current_phase != Phase::MAIN_DURATION) {
     return;
   }
+
+  worker->stats.req_failed += req_left;
+  worker->stats.req_error += req_left;
+
+  req_left = 0;
+
+  if (req_inflight == 0) {
+    terminate_session();
+  }
+  std::cout << "Process Request Failure:" << worker->stats.req_failed
+            << std::endl;
 }
 
 namespace {
@@ -595,7 +662,8 @@ void print_server_tmp_key(SSL *ssl) {
 
   std::cout << "Server Temp Key: ";
 
-  switch (EVP_PKEY_id(key)) {
+  auto pkey_id = EVP_PKEY_id(key);
+  switch (pkey_id) {
   case EVP_PKEY_RSA:
     std::cout << "RSA " << EVP_PKEY_bits(key) << " bits" << std::endl;
     break;
@@ -615,6 +683,10 @@ void print_server_tmp_key(SSL *ssl) {
               << std::endl;
     break;
   }
+  default:
+    std::cout << OBJ_nid2sn(pkey_id) << " " << EVP_PKEY_bits(key) << " bits"
+              << std::endl;
+    break;
   }
 #endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
 }
@@ -624,7 +696,7 @@ void Client::report_tls_info() {
   if (worker->id == 0 && !worker->tls_info_report_done) {
     worker->tls_info_report_done = true;
     auto cipher = SSL_get_current_cipher(ssl);
-    std::cout << "TLS Protocol: " << ssl::get_tls_protocol(ssl) << "\n"
+    std::cout << "TLS Protocol: " << tls::get_tls_protocol(ssl) << "\n"
               << "Cipher: " << SSL_CIPHER_get_name(cipher) << std::endl;
     print_server_tmp_key(ssl);
   }
@@ -652,6 +724,15 @@ void Client::on_header(int32_t stream_id, const uint8_t *name, size_t namelen,
     return;
   }
   auto &stream = (*itr).second;
+
+  if (worker->current_phase != Phase::MAIN_DURATION) {
+    // If the stream is for warm-up phase, then mark as a success
+    // But we do not update the count for 2xx, 3xx, etc status codes
+    // Same has been done in on_status_code function
+    stream.status_success = 1;
+    return;
+  }
+
   if (stream.status_success == -1 && namelen == 7 &&
       util::streq_l(":status", name, namelen)) {
     int status = 0;
@@ -668,6 +749,7 @@ void Client::on_header(int32_t stream_id, const uint8_t *name, size_t namelen,
       }
     }
 
+    stream.req_stat.status = status;
     if (status >= 200 && status < 300) {
       ++worker->stats.status[2];
       stream.status_success = 1;
@@ -690,6 +772,12 @@ void Client::on_status_code(int32_t stream_id, uint16_t status) {
   }
   auto &stream = (*itr).second;
 
+  if (worker->current_phase != Phase::MAIN_DURATION) {
+    stream.status_success = 1;
+    return;
+  }
+
+  stream.req_stat.status = status;
   if (status >= 200 && status < 300) {
     ++worker->stats.status[2];
     stream.status_success = 1;
@@ -705,51 +793,80 @@ void Client::on_status_code(int32_t stream_id, uint16_t status) {
 }
 
 void Client::on_stream_close(int32_t stream_id, bool success, bool final) {
-  auto req_stat = get_req_stat(stream_id);
-  if (!req_stat) {
-    return;
-  }
+  if (worker->current_phase == Phase::MAIN_DURATION) {
+    if (req_inflight > 0) {
+      --req_inflight;
+    }
+    auto req_stat = get_req_stat(stream_id);
+    if (!req_stat) {
+      return;
+    }
 
-  req_stat->stream_close_time = std::chrono::steady_clock::now();
-  if (success) {
-    req_stat->completed = true;
-    ++worker->stats.req_success;
-    ++cstat.req_success;
+    req_stat->stream_close_time = std::chrono::steady_clock::now();
+    if (success) {
+      req_stat->completed = true;
+      ++worker->stats.req_success;
+      ++cstat.req_success;
 
-    if (streams[stream_id].status_success == 1) {
-      ++worker->stats.req_status_success;
+      if (streams[stream_id].status_success == 1) {
+        ++worker->stats.req_status_success;
+      } else {
+        ++worker->stats.req_failed;
+      }
+
+      worker->sample_req_stat(req_stat);
+
+      // Count up in successful cases only
+      ++worker->request_times_smp.n;
     } else {
       ++worker->stats.req_failed;
+      ++worker->stats.req_error;
     }
+    ++worker->stats.req_done;
+    ++req_done;
 
-    if (sampling_should_pick(worker->request_times_smp)) {
-      sampling_advance_point(worker->request_times_smp);
-      worker->sample_req_stat(req_stat);
+    if (worker->config->log_fd != -1) {
+      auto start = std::chrono::duration_cast<std::chrono::microseconds>(
+          req_stat->request_wall_time.time_since_epoch());
+      auto delta = std::chrono::duration_cast<std::chrono::microseconds>(
+          req_stat->stream_close_time - req_stat->request_time);
+
+      std::array<uint8_t, 256> buf;
+      auto p = std::begin(buf);
+      p = util::utos(p, start.count());
+      *p++ = '\t';
+      if (success) {
+        p = util::utos(p, req_stat->status);
+      } else {
+        *p++ = '-';
+        *p++ = '1';
+      }
+      *p++ = '\t';
+      p = util::utos(p, delta.count());
+      *p++ = '\n';
+
+      auto nwrite = static_cast<size_t>(std::distance(std::begin(buf), p));
+      assert(nwrite <= buf.size());
+      while (write(worker->config->log_fd, buf.data(), nwrite) == -1 &&
+             errno == EINTR)
+        ;
     }
-
-    // Count up in successful cases only
-    ++worker->request_times_smp.n;
-  } else {
-    ++worker->stats.req_failed;
-    ++worker->stats.req_error;
   }
-
-  ++worker->stats.req_done;
-  ++req_done;
 
   worker->report_progress();
   streams.erase(stream_id);
-  if (req_done == req_todo) {
+  if (req_left == 0 && req_inflight == 0) {
     terminate_session();
     return;
   }
 
-  if (!config.timing_script && !final) {
-    if (req_started < req_todo) {
-      if (submit_request() != 0) {
-        process_request_failure();
+  if (!final && req_left > 0) {
+    if (config.timing_script) {
+      if (!ev_is_active(&request_timeout_watcher)) {
+        ev_feed_event(worker->loop, &request_timeout_watcher, EV_TIMER);
       }
-      return;
+    } else if (submit_request() != 0) {
+      process_request_failure();
     }
   }
 }
@@ -770,7 +887,9 @@ int Client::connection_made() {
     const unsigned char *next_proto = nullptr;
     unsigned int next_proto_len;
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
     SSL_get0_next_proto_negotiated(ssl, &next_proto, &next_proto_len);
+#endif // !OPENSSL_NO_NEXTPROTONEG
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
     if (next_proto == nullptr) {
       SSL_get0_alpn_selected(ssl, &next_proto, &next_proto_len);
@@ -780,18 +899,10 @@ int Client::connection_made() {
     if (next_proto) {
       auto proto = StringRef{next_proto, next_proto_len};
       if (util::check_h2_is_selected(proto)) {
-        session = make_unique<Http2Session>(this);
+        session = std::make_unique<Http2Session>(this);
       } else if (util::streq(NGHTTP2_H1_1, proto)) {
-        session = make_unique<Http1Session>(this);
+        session = std::make_unique<Http1Session>(this);
       }
-#ifdef HAVE_SPDYLAY
-      else {
-        auto spdy_version = spdylay_npn_get_version(next_proto, next_proto_len);
-        if (spdy_version) {
-          session = make_unique<SpdySession>(this, spdy_version);
-        }
-      }
-#endif // HAVE_SPDYLAY
 
       // Just assign next_proto to selected_proto anyway to show the
       // negotiation result.
@@ -805,7 +916,7 @@ int Client::connection_made() {
           std::cout
               << "Server does not support NPN/ALPN. Falling back to HTTP/1.1."
               << std::endl;
-          session = make_unique<Http1Session>(this);
+          session = std::make_unique<Http1Session>(this);
           selected_proto = NGHTTP2_H1_1.str();
           break;
         }
@@ -829,27 +940,13 @@ int Client::connection_made() {
   } else {
     switch (config.no_tls_proto) {
     case Config::PROTO_HTTP2:
-      session = make_unique<Http2Session>(this);
+      session = std::make_unique<Http2Session>(this);
       selected_proto = NGHTTP2_CLEARTEXT_PROTO_VERSION_ID;
       break;
     case Config::PROTO_HTTP1_1:
-      session = make_unique<Http1Session>(this);
+      session = std::make_unique<Http1Session>(this);
       selected_proto = NGHTTP2_H1_1.str();
       break;
-#ifdef HAVE_SPDYLAY
-    case Config::PROTO_SPDY2:
-      session = make_unique<SpdySession>(this, SPDYLAY_PROTO_SPDY2);
-      selected_proto = "spdy/2";
-      break;
-    case Config::PROTO_SPDY3:
-      session = make_unique<SpdySession>(this, SPDYLAY_PROTO_SPDY3);
-      selected_proto = "spdy/3";
-      break;
-    case Config::PROTO_SPDY3_1:
-      session = make_unique<SpdySession>(this, SPDYLAY_PROTO_SPDY3_1);
-      selected_proto = "spdy/3.1";
-      break;
-#endif // HAVE_SPDYLAY
     default:
       // unreachable
       assert(0);
@@ -865,8 +962,9 @@ int Client::connection_made() {
   record_connect_time();
 
   if (!config.timing_script) {
-    auto nreq =
-        std::min(req_todo - req_started, session->max_concurrent_streams());
+    auto nreq = config.is_timing_based_mode()
+                    ? std::max(req_left, session->max_concurrent_streams())
+                    : std::min(req_left, session->max_concurrent_streams());
     for (; nreq > 0; --nreq) {
       if (submit_request() != 0) {
         process_request_failure();
@@ -907,7 +1005,9 @@ int Client::on_read(const uint8_t *data, size_t len) {
   if (rv != 0) {
     return -1;
   }
-  worker->stats.bytes_total += len;
+  if (worker->current_phase == Phase::MAIN_DURATION) {
+    worker->stats.bytes_total += len;
+  }
   signal_write();
   return 0;
 }
@@ -1107,6 +1207,7 @@ int Client::write_tls() {
 
 void Client::record_request_time(RequestStat *req_stat) {
   req_stat->request_time = std::chrono::steady_clock::now();
+  req_stat->request_wall_time = std::chrono::system_clock::now();
 }
 
 void Client::record_connect_start_time() {
@@ -1177,38 +1278,79 @@ Worker::Worker(uint32_t id, SSL_CTX *ssl_ctx, size_t req_todo, size_t nclients,
       rate(rate),
       max_samples(max_samples),
       next_client_id(0) {
-  if (!config->is_rate_mode()) {
+  if (!config->is_rate_mode() && !config->is_timing_based_mode()) {
     progress_interval = std::max(static_cast<size_t>(1), req_todo / 10);
   } else {
     progress_interval = std::max(static_cast<size_t>(1), nclients / 10);
   }
 
+  // Below timeout is not needed in case of timing-based benchmarking
   // create timer that will go off every rate_period
   ev_timer_init(&timeout_watcher, rate_period_timeout_w_cb, 0.,
                 config->rate_period);
   timeout_watcher.data = this;
 
-  stats.req_stats.reserve(std::min(req_todo, max_samples));
-  stats.client_stats.reserve(std::min(nclients, max_samples));
+  if (config->is_timing_based_mode()) {
+    stats.req_stats.reserve(std::max(req_todo, max_samples));
+    stats.client_stats.reserve(std::max(nclients, max_samples));
+  } else {
+    stats.req_stats.reserve(std::min(req_todo, max_samples));
+    stats.client_stats.reserve(std::min(nclients, max_samples));
+  }
 
-  sampling_init(request_times_smp, req_todo, max_samples);
-  sampling_init(client_smp, nclients, max_samples);
+  sampling_init(request_times_smp, max_samples);
+  sampling_init(client_smp, max_samples);
+
+  ev_timer_init(&duration_watcher, duration_timeout_cb, config->duration, 0.);
+  duration_watcher.data = this;
+
+  ev_timer_init(&warmup_watcher, warmup_timeout_cb, config->warm_up_time, 0.);
+  warmup_watcher.data = this;
+
+  if (config->is_timing_based_mode()) {
+    current_phase = Phase::INITIAL_IDLE;
+  } else {
+    current_phase = Phase::MAIN_DURATION;
+  }
 }
 
 Worker::~Worker() {
   ev_timer_stop(loop, &timeout_watcher);
+  ev_timer_stop(loop, &duration_watcher);
+  ev_timer_stop(loop, &warmup_watcher);
   ev_loop_destroy(loop);
 }
 
+void Worker::stop_all_clients() {
+  for (auto client : clients) {
+    if (client && client->session) {
+      client->terminate_session();
+    }
+  }
+}
+
+void Worker::free_client(Client *deleted_client) {
+  for (auto &client : clients) {
+    if (client == deleted_client) {
+      client->req_todo = client->req_done;
+      stats.req_todo += client->req_todo;
+      auto index = &client - &clients[0];
+      clients[index] = NULL;
+      return;
+    }
+  }
+}
+
 void Worker::run() {
-  if (!config->is_rate_mode()) {
+  if (!config->is_rate_mode() && !config->is_timing_based_mode()) {
     for (size_t i = 0; i < nclients; ++i) {
       auto req_todo = nreqs_per_client;
       if (nreqs_rem > 0) {
         ++req_todo;
         --nreqs_rem;
       }
-      auto client = make_unique<Client>(next_client_id++, this, req_todo);
+
+      auto client = std::make_unique<Client>(next_client_id++, this, req_todo);
       if (client->connect() != 0) {
         std::cerr << "client could not connect to host" << std::endl;
         client->fail();
@@ -1216,27 +1358,45 @@ void Worker::run() {
         client.release();
       }
     }
-  } else {
+  } else if (config->is_rate_mode()) {
     ev_timer_again(loop, &timeout_watcher);
 
     // call callback so that we don't waste the first rate_period
+    rate_period_timeout_w_cb(loop, &timeout_watcher, 0);
+  } else {
+    // call the callback to start for one single time
     rate_period_timeout_w_cb(loop, &timeout_watcher, 0);
   }
   ev_run(loop, 0);
 }
 
+namespace {
+template <typename Stats, typename Stat>
+void sample(Sampling &smp, Stats &stats, Stat *s) {
+  ++smp.n;
+  if (stats.size() < smp.max_samples) {
+    stats.push_back(*s);
+    return;
+  }
+  auto d = std::uniform_int_distribution<unsigned long>(0, smp.n - 1);
+  auto i = d(gen);
+  if (i < smp.max_samples) {
+    stats[i] = *s;
+  }
+}
+} // namespace
+
 void Worker::sample_req_stat(RequestStat *req_stat) {
-  stats.req_stats.push_back(*req_stat);
-  assert(stats.req_stats.size() <= max_samples);
+  sample(request_times_smp, stats.req_stats, req_stat);
 }
 
 void Worker::sample_client_stat(ClientStat *cstat) {
-  stats.client_stats.push_back(*cstat);
-  assert(stats.client_stats.size() <= max_samples);
+  sample(client_smp, stats.client_stats, cstat);
 }
 
 void Worker::report_progress() {
-  if (id != 0 || config->is_rate_mode() || stats.req_done % progress_interval) {
+  if (id != 0 || config->is_rate_mode() || stats.req_done % progress_interval ||
+      config->is_timing_based_mode()) {
     return;
   }
 
@@ -1314,14 +1474,10 @@ process_time_stats(const std::vector<std::unique_ptr<Worker>> &workers) {
   size_t nclient_times = 0;
   for (const auto &w : workers) {
     nrequest_times += w->stats.req_stats.size();
-    if (w->request_times_smp.interval != 0.) {
-      request_times_sampling = true;
-    }
+    request_times_sampling = w->request_times_smp.n > w->stats.req_stats.size();
 
     nclient_times += w->stats.client_stats.size();
-    if (w->client_smp.interval != 0.) {
-      client_times_sampling = true;
-    }
+    client_times_sampling = w->client_smp.n > w->stats.client_stats.size();
   }
 
   std::vector<double> request_times;
@@ -1388,7 +1544,7 @@ process_time_stats(const std::vector<std::unique_ptr<Worker>> &workers) {
 namespace {
 void resolve_host() {
   if (config.base_uri_unix) {
-    auto res = make_unique<addrinfo>();
+    auto res = std::make_unique<addrinfo>();
     res->ai_family = config.unix_addr.sun_family;
     res->ai_socktype = SOCK_STREAM;
     res->ai_addrlen = sizeof(config.unix_addr);
@@ -1440,6 +1596,7 @@ std::string get_reqline(const char *uri, const http_parser_url &u) {
 }
 } // namespace
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
 namespace {
 int client_select_next_proto_cb(SSL *ssl, unsigned char **out,
                                 unsigned char *outlen, const unsigned char *in,
@@ -1454,6 +1611,7 @@ int client_select_next_proto_cb(SSL *ssl, unsigned char **out,
   return SSL_TLSEXT_ERR_NOACK;
 }
 } // namespace
+#endif // !OPENSSL_NO_NEXTPROTONEG
 
 namespace {
 constexpr char UNIX_PATH_PREFIX[] = "unix:";
@@ -1582,12 +1740,27 @@ std::unique_ptr<Worker> create_worker(uint32_t id, SSL_CTX *ssl_ctx,
                 << util::duration_str(config.rate_period) << " ";
   }
 
-  std::cout << "spawning thread #" << id << ": " << nclients
-            << " total client(s). " << rate_report.str() << nreqs
-            << " total requests" << std::endl;
+  if (config.is_timing_based_mode()) {
+    std::cout << "spawning thread #" << id << ": " << nclients
+              << " total client(s). Timing-based test with "
+              << config.warm_up_time << "s of warm-up time and "
+              << config.duration << "s of main duration for measurements."
+              << std::endl;
+  } else {
+    std::cout << "spawning thread #" << id << ": " << nclients
+              << " total client(s). " << rate_report.str() << nreqs
+              << " total requests" << std::endl;
+  }
 
-  return make_unique<Worker>(id, ssl_ctx, nreqs, nclients, rate, max_samples,
-                             &config);
+  if (config.is_rate_mode()) {
+    return std::make_unique<Worker>(id, ssl_ctx, nreqs, nclients, rate,
+                                    max_samples, &config);
+  } else {
+    // Here rate is same as client because the rate_timeout callback
+    // will be called only once
+    return std::make_unique<Worker>(id, ssl_ctx, nreqs, nclients, nclients,
+                                    max_samples, &config);
+  }
 }
 } // namespace
 
@@ -1621,17 +1794,13 @@ void print_version(std::ostream &out) {
 namespace {
 void print_usage(std::ostream &out) {
   out << R"(Usage: h2load [OPTIONS]... [URI]...
-benchmarking tool for HTTP/2 and SPDY server)"
+benchmarking tool for HTTP/2 server)"
       << std::endl;
 }
 } // namespace
 
 namespace {
-constexpr char DEFAULT_NPN_LIST[] = "h2,h2-16,h2-14"
-#ifdef HAVE_SPDYLAY
-                                    ",spdy/3.1,spdy/3,spdy/2"
-#endif // HAVE_SPDYLAY
-                                    ",http/1.1";
+constexpr char DEFAULT_NPN_LIST[] = "h2,h2-16,h2-14,http/1.1";
 } // namespace
 
 namespace {
@@ -1653,7 +1822,9 @@ Options:
               Number of  requests across all  clients.  If it  is used
               with --timing-script-file option,  this option specifies
               the number of requests  each client performs rather than
-              the number of requests across all clients.
+              the number of requests  across all clients.  This option
+              is ignored if timing-based  benchmarking is enabled (see
+              --duration option).
               Default: )"
       << config.nreqs << R"(
   -c, --clients=<N>
@@ -1682,14 +1853,11 @@ Options:
               Default: 1
   -w, --window-bits=<N>
               Sets the stream level initial window size to (2**<N>)-1.
-              For SPDY, 2**<N> is used instead.
               Default: )"
       << config.window_bits << R"(
   -W, --connection-window-bits=<N>
               Sets  the  connection  level   initial  window  size  to
-              (2**<N>)-1.  For SPDY, if <N>  is strictly less than 16,
-              this option  is ignored.   Otherwise 2**<N> is  used for
-              SPDY.
+              (2**<N>)-1.
               Default: )"
       << config.connection_window_bits << R"(
   -H, --header=<HEADER>
@@ -1697,20 +1865,13 @@ Options:
   --ciphers=<SUITE>
               Set allowed  cipher list.  The  format of the  string is
               described in OpenSSL ciphers(1).
+              Default: )"
+      << config.ciphers << R"(
   -p, --no-tls-proto=<PROTOID>
               Specify ALPN identifier of the  protocol to be used when
-              accessing http URI without SSL/TLS.)";
-
-#ifdef HAVE_SPDYLAY
-  out << R"(
-              Available protocols: spdy/2, spdy/3, spdy/3.1, )";
-#else  // !HAVE_SPDYLAY
-  out << R"(
-              Available protocols: )";
-#endif // !HAVE_SPDYLAY
-  out << NGHTTP2_CLEARTEXT_PROTO_VERSION_ID << R"( and
-              )"
-      << NGHTTP2_H1_1 << R"(
+              accessing http URI without SSL/TLS.
+              Available protocols: )"
+      << NGHTTP2_CLEARTEXT_PROTO_VERSION_ID << R"( and )" << NGHTTP2_H1_1 << R"(
               Default: )"
       << NGHTTP2_CLEARTEXT_PROTO_VERSION_ID << R"(
   -d, --data=<PATH>
@@ -1729,13 +1890,21 @@ Options:
               connections per period.  When the rate is 0, the program
               will run  as it  normally does, creating  connections at
               whatever variable rate it  wants.  The default value for
-              this option is 0.
+              this option is 0.  -r and -D are mutually exclusive.
   --rate-period=<DURATION>
               Specifies the time  period between creating connections.
               The period  must be a positive  number, representing the
               length of the period in time.  This option is ignored if
               the rate option is not used.  The default value for this
               option is 1s.
+  -D, --duration=<N>
+              Specifies the main duration for the measurements in case
+              of timing-based  benchmarking.  -D  and -r  are mutually
+              exclusive.
+  --warm-up-time=<DURATION>
+              Specifies the  time  period  before  starting the actual
+              measurements, in  case  of  timing-based benchmarking.
+              Needs to provided along with -D option.
   -T, --connection-active-timeout=<DURATION>
               Specifies  the maximum  time that  h2load is  willing to
               keep a  connection open,  regardless of the  activity on
@@ -1802,6 +1971,14 @@ Options:
               this option value and the value which server specified.
               Default: )"
       << util::utos_unit(config.encoder_header_table_size) << R"(
+  --log-file=<PATH>
+              Write per-request information to a file as tab-separated
+              columns: start  time as  microseconds since  epoch; HTTP
+              status code;  microseconds until end of  response.  More
+              columns may be added later.  Rows are ordered by end-of-
+              response  time when  using  one worker  thread, but  may
+              appear slightly  out of order with  multiple threads due
+              to buffering.  Status code is -1 for failed streams.
   -v, --verbose
               Output debug information.
   --version   Display version information and exit.
@@ -1821,17 +1998,18 @@ Options:
 } // namespace
 
 int main(int argc, char **argv) {
-  ssl::libssl_init();
+  tls::libssl_init();
 
 #ifndef NOTHREADS
-  ssl::LibsslGlobalLock lock;
+  tls::LibsslGlobalLock lock;
 #endif // NOTHREADS
 
   std::string datafile;
+  std::string logfile;
   bool nreqs_set_manually = false;
   while (1) {
     static int flag = 0;
-    static option long_options[] = {
+    constexpr static option long_options[] = {
         {"requests", required_argument, nullptr, 'n'},
         {"clients", required_argument, nullptr, 'c'},
         {"data", required_argument, nullptr, 'd'},
@@ -1849,6 +2027,7 @@ int main(int argc, char **argv) {
         {"rate", required_argument, nullptr, 'r'},
         {"connection-active-timeout", required_argument, nullptr, 'T'},
         {"connection-inactivity-timeout", required_argument, nullptr, 'N'},
+        {"duration", required_argument, nullptr, 'D'},
         {"timing-script-file", required_argument, &flag, 3},
         {"base-uri", required_argument, nullptr, 'B'},
         {"npn-list", required_argument, &flag, 4},
@@ -1856,10 +2035,13 @@ int main(int argc, char **argv) {
         {"h1", no_argument, &flag, 6},
         {"header-table-size", required_argument, &flag, 7},
         {"encoder-header-table-size", required_argument, &flag, 8},
+        {"warm-up-time", required_argument, &flag, 9},
+        {"log-file", required_argument, &flag, 10},
         {nullptr, 0, nullptr, 0}};
     int option_index = 0;
-    auto c = getopt_long(argc, argv, "hvW:c:d:m:n:p:t:w:H:i:r:T:N:B:",
-                         long_options, &option_index);
+    auto c = getopt_long(argc, argv,
+                         "hvW:c:d:m:n:p:t:w:H:i:r:T:N:D:B:", long_options,
+                         &option_index);
     if (c == -1) {
       break;
     }
@@ -1940,14 +2122,6 @@ int main(int argc, char **argv) {
         config.no_tls_proto = Config::PROTO_HTTP2;
       } else if (util::strieq(NGHTTP2_H1_1, proto)) {
         config.no_tls_proto = Config::PROTO_HTTP1_1;
-#ifdef HAVE_SPDYLAY
-      } else if (util::strieq_l("spdy/2", proto)) {
-        config.no_tls_proto = Config::PROTO_SPDY2;
-      } else if (util::strieq_l("spdy/3", proto)) {
-        config.no_tls_proto = Config::PROTO_SPDY3;
-      } else if (util::strieq_l("spdy/3.1", proto)) {
-        config.no_tls_proto = Config::PROTO_SPDY3_1;
-#endif // HAVE_SPDYLAY
       } else {
         std::cerr << "-p: unsupported protocol " << proto << std::endl;
         exit(EXIT_FAILURE);
@@ -2014,6 +2188,14 @@ int main(int argc, char **argv) {
       config.base_uri = arg.str();
       break;
     }
+    case 'D':
+      config.duration = strtoul(optarg, nullptr, 10);
+      if (config.duration == 0) {
+        std::cerr << "-D: the main duration for timing-based benchmarking "
+                  << "must be positive." << std::endl;
+        exit(EXIT_FAILURE);
+      }
+      break;
     case 'v':
       config.verbose = true;
       break;
@@ -2069,6 +2251,18 @@ int main(int argc, char **argv) {
                                     "encoder-header-table-size", optarg) != 0) {
           exit(EXIT_FAILURE);
         }
+        break;
+      case 9:
+        // --warm-up-time
+        config.warm_up_time = util::parse_duration_with_unit(optarg);
+        if (!std::isfinite(config.warm_up_time)) {
+          std::cerr << "--warm-up-time: value error " << optarg << std::endl;
+          exit(EXIT_FAILURE);
+        }
+        break;
+      case 10:
+        // --log-file
+        logfile = optarg;
         break;
       }
       break;
@@ -2155,8 +2349,14 @@ int main(int argc, char **argv) {
     exit(EXIT_FAILURE);
   }
 
-  if (config.nreqs == 0) {
-    std::cerr << "-n: the number of requests must be strictly greater than 0."
+  if (config.is_timing_based_mode() && config.is_rate_mode()) {
+    std::cerr << "-r, -D: they are mutually exclusive." << std::endl;
+    exit(EXIT_FAILURE);
+  }
+
+  if (config.nreqs == 0 && !config.is_timing_based_mode()) {
+    std::cerr << "-n: the number of requests must be strictly greater than 0 "
+                 "if timing-based test is not being run."
               << std::endl;
     exit(EXIT_FAILURE);
   }
@@ -2180,7 +2380,8 @@ int main(int argc, char **argv) {
 
   // With timing script, we don't distribute config.nreqs to each
   // client or thread.
-  if (!config.timing_script && config.nreqs < config.nclients) {
+  if (!config.timing_script && config.nreqs < config.nclients &&
+      !config.is_timing_based_mode()) {
     std::cerr << "-n, -c: the number of requests must be greater than or "
               << "equal to the clients." << std::endl;
     exit(EXIT_FAILURE);
@@ -2188,9 +2389,12 @@ int main(int argc, char **argv) {
 
   if (config.nclients < config.nthreads) {
     std::cerr << "-c, -t: the number of clients must be greater than or equal "
-                 "to the number of threads."
-              << std::endl;
+              << "to the number of threads." << std::endl;
     exit(EXIT_FAILURE);
+  }
+
+  if (config.is_timing_based_mode()) {
+    config.nreqs = 0;
   }
 
   if (config.is_rate_mode()) {
@@ -2222,6 +2426,15 @@ int main(int argc, char **argv) {
     config.data_length = data_stat.st_size;
   }
 
+  if (!logfile.empty()) {
+    config.log_fd = open(logfile.c_str(), O_WRONLY | O_CREAT | O_APPEND,
+                         S_IRUSR | S_IWUSR | S_IRGRP);
+    if (config.log_fd == -1) {
+      std::cerr << "--log-file: Could not open file " << logfile << std::endl;
+      exit(EXIT_FAILURE);
+    }
+  }
+
   struct sigaction act {};
   act.sa_handler = SIG_IGN;
   sigaction(SIGPIPE, &act, nullptr);
@@ -2241,22 +2454,24 @@ int main(int argc, char **argv) {
   SSL_CTX_set_mode(ssl_ctx, SSL_MODE_AUTO_RETRY);
   SSL_CTX_set_mode(ssl_ctx, SSL_MODE_RELEASE_BUFFERS);
 
-  const char *ciphers;
-  if (config.ciphers.empty()) {
-    ciphers = ssl::DEFAULT_CIPHER_LIST;
-  } else {
-    ciphers = config.ciphers.c_str();
+  if (nghttp2::tls::ssl_ctx_set_proto_versions(
+          ssl_ctx, nghttp2::tls::NGHTTP2_TLS_MIN_VERSION,
+          nghttp2::tls::NGHTTP2_TLS_MAX_VERSION) != 0) {
+    std::cerr << "Could not set TLS versions" << std::endl;
+    exit(EXIT_FAILURE);
   }
 
-  if (SSL_CTX_set_cipher_list(ssl_ctx, ciphers) == 0) {
-    std::cerr << "SSL_CTX_set_cipher_list with " << ciphers
+  if (SSL_CTX_set_cipher_list(ssl_ctx, config.ciphers.c_str()) == 0) {
+    std::cerr << "SSL_CTX_set_cipher_list with " << config.ciphers
               << " failed: " << ERR_error_string(ERR_get_error(), nullptr)
               << std::endl;
     exit(EXIT_FAILURE);
   }
 
+#ifndef OPENSSL_NO_NEXTPROTONEG
   SSL_CTX_set_next_proto_select_cb(ssl_ctx, client_select_next_proto_cb,
                                    nullptr);
+#endif // !OPENSSL_NO_NEXTPROTONEG
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
   std::vector<unsigned char> proto_list;
@@ -2311,7 +2526,6 @@ int main(int argc, char **argv) {
 
   config.h1reqs.reserve(reqlines.size());
   config.nva.reserve(reqlines.size());
-  config.nv.reserve(reqlines.size());
 
   for (auto &req : reqlines) {
     // For HTTP/1.1
@@ -2361,35 +2575,6 @@ int main(int argc, char **argv) {
     }
 
     config.nva.push_back(std::move(nva));
-
-    // For spdylay
-    std::vector<const char *> cva;
-    // 3 for :path, :version, and possible content-length, 1 for
-    // terminal nullptr
-    cva.reserve(2 * (3 + shared_nva.size()) + 1);
-
-    cva.push_back(":path");
-    cva.push_back(req.c_str());
-
-    for (auto &nv : shared_nva) {
-      if (nv.name == ":authority") {
-        cva.push_back(":host");
-      } else {
-        cva.push_back(nv.name.c_str());
-      }
-      cva.push_back(nv.value.c_str());
-    }
-    cva.push_back(":version");
-    cva.push_back("HTTP/1.1");
-
-    if (!content_length_str.empty()) {
-      cva.push_back("content-length");
-      cva.push_back(content_length_str.c_str());
-    }
-
-    cva.push_back(nullptr);
-
-    config.nv.push_back(std::move(cva));
   }
 
   // Don't DOS our server!
@@ -2526,7 +2711,7 @@ int main(int argc, char **argv) {
   // Requests which have not been issued due to connection errors, are
   // counted towards req_failed and req_error.
   auto req_not_issued =
-      stats.req_todo - stats.req_status_success - stats.req_failed;
+      (stats.req_todo - stats.req_status_success - stats.req_failed);
   stats.req_failed += req_not_issued;
   stats.req_error += req_not_issued;
 
@@ -2537,10 +2722,17 @@ int main(int argc, char **argv) {
   double rps = 0;
   int64_t bps = 0;
   if (duration.count() > 0) {
-    auto secd = std::chrono::duration_cast<
-        std::chrono::duration<double, std::chrono::seconds::period>>(duration);
-    rps = stats.req_success / secd.count();
-    bps = stats.bytes_total / secd.count();
+    if (config.is_timing_based_mode()) {
+      // we only want to consider the main duration if warm-up is given
+      rps = stats.req_success / config.duration;
+      bps = stats.bytes_total / config.duration;
+    } else {
+      auto secd = std::chrono::duration_cast<
+          std::chrono::duration<double, std::chrono::seconds::period>>(
+          duration);
+      rps = stats.req_success / secd.count();
+      bps = stats.bytes_total / secd.count();
+    }
   }
 
   double header_space_savings = 0.;
@@ -2592,6 +2784,10 @@ time for request: )"
             << util::dtos(ts.rps.within_sd) << "%" << std::endl;
 
   SSL_CTX_free(ssl_ctx);
+
+  if (config.log_fd != -1) {
+    close(config.log_fd);
+  }
 
   return 0;
 }
