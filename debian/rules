@@ -26,7 +26,10 @@ override_dh_auto_install-arch: custom_install_init_scripts custom_install_system
 override_dh_auto_install-indep: custom_install_manual
 
 override_dh_installinit:
-	dh_installinit -pnghttp2-proxy --onlyscripts --name=nghttpx
+	dh_installinit -pnghttp2-proxy --onlyscripts --name=nghttpx --no-stop-on-upgrade --no-start
+
+override_dh_installsystemd:
+	dh_installsystemd --no-restart-after-upgrade --no-stop-on-upgrade --no-start
 
 .PHONY: custom_install_manual custom_install_init_scripts custom_install_systemd
 
@@ -37,6 +40,7 @@ custom_install_manual:
 	rm $(DOCDIR)/objects.inv
 	ln -sf /usr/share/javascript/jquery/jquery.js $(DOCDIR)/_static/jquery.js
 	ln -sf /usr/share/javascript/underscore/underscore.js $(DOCDIR)/_static/underscore.js
+	cp -p doc/README.rst $(DOCDIR)
 
 ETCDIR="debian/nghttp2-proxy/etc"
 custom_install_init_scripts:

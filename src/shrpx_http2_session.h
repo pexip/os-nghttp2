@@ -36,7 +36,7 @@
 
 #include <nghttp2/nghttp2.h>
 
-#include "http-parser/http_parser.h"
+#include "llhttp.h"
 
 #include "shrpx_connection.h"
 #include "buffer.h"
@@ -61,9 +61,6 @@ struct StreamData {
 enum class FreelistZone {
   // Http2Session object is not linked in any freelist.
   NONE,
-  // Http2Session object is linked in group scope
-  // http2_avail_freelist.
-  AVAIL,
   // Http2Session object is linked in address scope
   // http2_extra_freelist.
   EXTRA,
@@ -268,7 +265,7 @@ private:
   std::function<int(Http2Session &, const uint8_t *, size_t)> on_read_;
   std::function<int(Http2Session &)> on_write_;
   // Used to parse the response from HTTP proxy
-  std::unique_ptr<http_parser> proxy_htp_;
+  std::unique_ptr<llhttp_t> proxy_htp_;
   Worker *worker_;
   // NULL if no TLS is configured
   SSL_CTX *ssl_ctx_;

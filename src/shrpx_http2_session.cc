@@ -336,6 +336,25 @@ int Http2Session::resolve_name() {
   }
 }
 
+namespace {
+int htp_hdrs_completecb(llhttp_t *htp);
+} // namespace
+
+namespace {
+constexpr llhttp_settings_t htp_hooks = {
+    nullptr,             // llhttp_cb      on_message_begin;
+    nullptr,             // llhttp_data_cb on_url;
+    nullptr,             // llhttp_data_cb on_status;
+    nullptr,             // llhttp_data_cb on_header_field;
+    nullptr,             // llhttp_data_cb on_header_value;
+    htp_hdrs_completecb, // llhttp_cb      on_headers_complete;
+    nullptr,             // llhttp_data_cb on_body;
+    nullptr,             // llhttp_cb      on_message_complete;
+    nullptr,             // llhttp_cb      on_chunk_header
+    nullptr,             // llhttp_cb      on_chunk_complete
+};
+} // namespace
+
 int Http2Session::initiate_connection() {
   int rv = 0;
 
@@ -402,8 +421,8 @@ int Http2Session::initiate_connection() {
     on_read_ = &Http2Session::downstream_read_proxy;
     on_write_ = &Http2Session::downstream_connect_proxy;
 
-    proxy_htp_ = std::make_unique<http_parser>();
-    http_parser_init(proxy_htp_.get(), HTTP_RESPONSE);
+    proxy_htp_ = std::make_unique<llhttp_t>();
+    llhttp_init(proxy_htp_.get(), HTTP_RESPONSE, &htp_hooks);
     proxy_htp_->data = this;
 
     state_ = Http2SessionState::PROXY_CONNECTING;
@@ -604,19 +623,12 @@ int Http2Session::initiate_connection() {
 }
 
 namespace {
-int htp_hdrs_completecb(http_parser *htp) {
+int htp_hdrs_completecb(llhttp_t *htp) {
   auto http2session = static_cast<Http2Session *>(htp->data);
 
   // We only read HTTP header part.  If tunneling succeeds, response
   // body is a different protocol (HTTP/2 in this case), we don't read
   // them here.
-  //
-  // Here is a caveat: http-parser returns 1 less bytes if we pause
-  // here.  The reason why they do this is probably they want to eat
-  // last 1 byte in s_headers_done state, on the other hand, this
-  // callback is called its previous state s_headers_almost_done.  We
-  // will do "+ 1" to the return value to workaround this.
-  http_parser_pause(htp, 1);
 
   // We just check status code here
   if (htp->status_code / 100 == 2) {
@@ -625,37 +637,19 @@ int htp_hdrs_completecb(http_parser *htp) {
     }
     http2session->set_state(Http2SessionState::PROXY_CONNECTED);
 
-    return 0;
+    return HPE_PAUSED;
   }
 
   SSLOG(WARN, http2session) << "Tunneling failed: " << htp->status_code;
   http2session->set_state(Http2SessionState::PROXY_FAILED);
 
-  return 0;
+  return HPE_PAUSED;
 }
 } // namespace
 
-namespace {
-constexpr http_parser_settings htp_hooks = {
-    nullptr,             // http_cb      on_message_begin;
-    nullptr,             // http_data_cb on_url;
-    nullptr,             // http_data_cb on_status;
-    nullptr,             // http_data_cb on_header_field;
-    nullptr,             // http_data_cb on_header_value;
-    htp_hdrs_completecb, // http_cb      on_headers_complete;
-    nullptr,             // http_data_cb on_body;
-    nullptr              // http_cb      on_message_complete;
-};
-} // namespace
-
 int Http2Session::downstream_read_proxy(const uint8_t *data, size_t datalen) {
-  auto nread =
-      http_parser_execute(proxy_htp_.get(), &htp_hooks,
-                          reinterpret_cast<const char *>(data), datalen);
-  (void)nread;
-
-  auto htperr = HTTP_PARSER_ERRNO(proxy_htp_.get());
-
+  auto htperr = llhttp_execute(proxy_htp_.get(),
+                               reinterpret_cast<const char *>(data), datalen);
   if (htperr == HPE_PAUSED) {
     switch (state_) {
     case Http2SessionState::PROXY_CONNECTED:
@@ -1103,6 +1097,7 @@ int on_response_headers(Http2Session *http2session, Downstream *downstream,
 
   auto status = resp.fs.header(http2::HD__STATUS);
   // libnghttp2 guarantees this exists and can be parsed
+  assert(status);
   auto status_code = http2::parse_http_status_code(status->value);
 
   resp.http_status = status_code;
@@ -2318,22 +2313,6 @@ Http2Session::get_downstream_addr_group() const {
   return group_;
 }
 
-void Http2Session::add_to_avail_freelist() {
-  if (freelist_zone_ != FreelistZone::NONE) {
-    return;
-  }
-
-  if (LOG_ENABLED(INFO)) {
-    SSLOG(INFO, this) << "Append to http2_avail_freelist, group="
-                      << group_.get() << ", freelist.size="
-                      << group_->shared_addr->http2_avail_freelist.size();
-  }
-
-  freelist_zone_ = FreelistZone::AVAIL;
-  group_->shared_addr->http2_avail_freelist.append(this);
-  addr_->in_avail = true;
-}
-
 void Http2Session::add_to_extra_freelist() {
   if (freelist_zone_ != FreelistZone::NONE) {
     return;
@@ -2353,15 +2332,6 @@ void Http2Session::remove_from_freelist() {
   switch (freelist_zone_) {
   case FreelistZone::NONE:
     return;
-  case FreelistZone::AVAIL:
-    if (LOG_ENABLED(INFO)) {
-      SSLOG(INFO, this) << "Remove from http2_avail_freelist, group=" << group_
-                        << ", freelist.size="
-                        << group_->shared_addr->http2_avail_freelist.size();
-    }
-    group_->shared_addr->http2_avail_freelist.remove(this);
-    addr_->in_avail = false;
-    break;
   case FreelistZone::EXTRA:
     if (LOG_ENABLED(INFO)) {
       SSLOG(INFO, this) << "Remove from http2_extra_freelist, addr=" << addr_
@@ -2408,6 +2378,10 @@ void Http2Session::check_retire() {
   }
 
   ev_prepare_stop(conn_.loop, &prep_);
+
+  if (!session_) {
+    return;
+  }
 
   auto last_stream_id = nghttp2_session_get_last_proc_stream_id(session_);
   nghttp2_submit_goaway(session_, NGHTTP2_FLAG_NONE, last_stream_id,

@@ -27,10 +27,18 @@ EXTRA_DIST = CMakeLists.txt
 
 if ENABLE_THIRD_PARTY
 
-noinst_LTLIBRARIES = libhttp-parser.la
-libhttp_parser_la_SOURCES = \
-	http-parser/http_parser.c \
-	http-parser/http_parser.h
+noinst_LTLIBRARIES = liburl-parser.la
+liburl_parser_la_SOURCES = \
+	url-parser/url_parser.c \
+	url-parser/url_parser.h
+
+noinst_LTLIBRARIES += libllhttp.la
+libllhttp_la_SOURCES = \
+	llhttp/src/api.c \
+	llhttp/src/http.c \
+	llhttp/src/llhttp.c \
+	llhttp/include/llhttp.h
+libllhttp_la_CPPFLAGS = -I${srcdir}/llhttp/include
 
 if HAVE_NEVERBLEED
 noinst_LTLIBRARIES += libneverbleed.la
@@ -46,19 +54,25 @@ EXTRA_DIST += build_config.rb mruby/*
 .PHONY: all-local clean mruby
 
 mruby:
-	MRUBY_CONFIG="${srcdir}/build_config.rb" \
+	mkdir -p "${abs_builddir}/mruby/build"
+	diff "${srcdir}/build_config.rb" "${abs_builddir}/mruby/build/build_config.rb" >& /dev/null || \
+	cp "${srcdir}/build_config.rb" "${abs_builddir}/mruby/build"
+	MRUBY_CONFIG="${abs_builddir}/mruby/build/build_config.rb" \
 	BUILD_DIR="${abs_builddir}/mruby/build" \
 	INSTALL_DIR="${abs_builddir}/mruby/build/install/bin" \
-	CC="${CC}" CXX="${CXX}" LD="${LD}" \
-	CFLAGS="${CPPFLAGS} ${CFLAGS}" CXXFLAGS="${CPPFLAGS} ${CXXFLAGS}" \
+	CC="${CC}" CXX="$(firstword $(CXX))" LD="${LD}" \
+	CFLAGS="${CPPFLAGS} ${CFLAGS}" \
+	CXXFLAGS="$(wordlist 2, $(words $(CXX)), $(CXX)) ${CPPFLAGS} ${CXXFLAGS}" \
 	LDFLAGS="${LDFLAGS}" \
 	"${srcdir}/mruby/minirake" -f "${srcdir}/mruby/Rakefile"
 
 all-local: mruby
 
 clean-local:
-	MRUBY_CONFIG="${srcdir}/build_config.rb" \
+	[ ! -f "${abs_builddir}/mruby/build/build_config.rb" ] || \
+	MRUBY_CONFIG="${abs_builddir}/mruby/build/build_config.rb" \
 	BUILD_DIR="${abs_builddir}/mruby/build" \
+	CC="${CC}" \
 	"${srcdir}/mruby/minirake" -f "${srcdir}/mruby/Rakefile" clean
 
 endif # HAVE_MRUBY

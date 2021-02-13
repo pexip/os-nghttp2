@@ -38,6 +38,8 @@
 
 #include <nghttp2/nghttp2.h>
 
+#include "llhttp.h"
+
 #include "shrpx_io_control.h"
 #include "shrpx_log_config.h"
 #include "http2.h"
@@ -117,6 +119,10 @@ public:
 
   bool trailer_key_prev() const { return trailer_key_prev_; }
 
+  // erase_content_length_and_transfer_encoding erases content-length
+  // and transfer-encoding header fields.
+  void erase_content_length_and_transfer_encoding();
+
   // content-length, -1 if it is unknown.
   int64_t content_length;
 
@@ -153,7 +159,8 @@ struct Request {
         http2_upgrade_seen(false),
         connection_close(false),
         http2_expect_body(false),
-        no_authority(false) {}
+        no_authority(false),
+        forwarded_once(false) {}
 
   void consume(size_t len) {
     assert(unconsumed_body_length >= len);
@@ -184,6 +191,12 @@ struct Request {
   // request-target.  For HTTP/2, this is :path header field value.
   // For CONNECT request, this is empty.
   StringRef path;
+  // This is original authority which cannot be changed by per-pattern
+  // mruby script.
+  StringRef orig_authority;
+  // This is original path which cannot be changed by per-pattern
+  // mruby script.
+  StringRef orig_path;
   // the length of request body received so far
   int64_t recv_body_length;
   // The number of bytes not consumed by the application yet.
@@ -209,6 +222,10 @@ struct Request {
   // This happens when: For HTTP/2 request, :authority is missing.
   // For HTTP/1 request, origin or asterisk form is used.
   bool no_authority;
+  // true if backend selection is done for request once.
+  // orig_authority and orig_path have the authority and path which
+  // are used for the first backend selection.
+  bool forwarded_once;
 };
 
 struct Response {
@@ -388,6 +405,7 @@ public:
 
   DefaultMemchunks *get_blocked_request_buf();
   bool get_blocked_request_data_eof() const;
+  void set_blocked_request_data_eof(bool f);
 
   // downstream response API
   const Response &response() const { return resp_; }
@@ -493,6 +511,8 @@ public:
 
   void set_ws_key(const StringRef &key);
 
+  bool get_expect_100_continue() const;
+
   enum {
     EVENT_ERROR = 0x1,
     EVENT_TIMEOUT = 0x2,
@@ -584,6 +604,8 @@ private:
   // true if eof is received from client before sending header fields
   // to backend.
   bool blocked_request_data_eof_;
+  // true if request contains "expect: 100-continue" header field.
+  bool expect_100_continue_;
 };
 
 } // namespace shrpx

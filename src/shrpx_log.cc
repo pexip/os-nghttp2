@@ -116,11 +116,10 @@ int Log::severity_thres_ = NOTICE;
 
 void Log::set_severity_level(int severity) { severity_thres_ = severity; }
 
-int Log::set_severity_level_by_name(const StringRef &name) {
+int Log::get_severity_level_by_name(const StringRef &name) {
   for (size_t i = 0, max = array_size(SEVERITY_STR); i < max; ++i) {
     if (name == SEVERITY_STR[i]) {
-      severity_thres_ = i;
-      return 0;
+      return i;
     }
   }
   return -1;
@@ -252,7 +251,7 @@ Log &Log::operator<<(long long n) {
     return *this;
   }
   *last_++ = '-';
-  *last_ += nlen;
+  last_ += nlen;
   update_full();
 
   auto p = last_ - 1;
@@ -594,7 +593,8 @@ void upstream_accesslog(const std::vector<LogFragment> &lfv,
   auto &balloc = downstream->get_block_allocator();
 
   auto downstream_addr = downstream->get_addr();
-  auto method = http2::to_method_string(req.method);
+  auto method = req.method == -1 ? StringRef::from_lit("<unknown>")
+                                 : http2::to_method_string(req.method);
   auto path = req.method == HTTP_CONNECT
                   ? req.authority
                   : config->http2_proxy
@@ -603,6 +603,11 @@ void upstream_accesslog(const std::vector<LogFragment> &lfv,
                                                  ? StringRef::from_lit("*")
                                                  : StringRef::from_lit("-")
                                            : req.path;
+  auto path_without_query =
+      req.method == HTTP_CONNECT
+          ? path
+          : StringRef{std::begin(path),
+                      std::find(std::begin(path), std::end(path), '?')};
 
   auto p = std::begin(buf);
   auto last = std::end(buf) - 2;
@@ -626,6 +631,24 @@ void upstream_accesslog(const std::vector<LogFragment> &lfv,
       std::tie(p, last) = copy(' ', p, last);
       std::tie(p, last) = copy_escape(path, p, last);
       std::tie(p, last) = copy_l(" HTTP/", p, last);
+      std::tie(p, last) = copy(req.http_major, p, last);
+      if (req.http_major < 2) {
+        std::tie(p, last) = copy('.', p, last);
+        std::tie(p, last) = copy(req.http_minor, p, last);
+      }
+      break;
+    case LogFragmentType::METHOD:
+      std::tie(p, last) = copy(method, p, last);
+      std::tie(p, last) = copy(' ', p, last);
+      break;
+    case LogFragmentType::PATH:
+      std::tie(p, last) = copy_escape(path, p, last);
+      break;
+    case LogFragmentType::PATH_WITHOUT_QUERY:
+      std::tie(p, last) = copy_escape(path_without_query, p, last);
+      break;
+    case LogFragmentType::PROTOCOL_VERSION:
+      std::tie(p, last) = copy_l("HTTP/", p, last);
       std::tie(p, last) = copy(req.http_major, p, last);
       if (req.http_major < 2) {
         std::tie(p, last) = copy('.', p, last);
