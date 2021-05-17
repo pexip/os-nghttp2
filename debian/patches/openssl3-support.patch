@@ -1,0 +1,305 @@
+diff --git a/examples/libevent-server.c b/examples/libevent-server.c
+index a553617..49d0952 100644
+--- a/examples/libevent-server.c
++++ b/examples/libevent-server.c
+@@ -142,7 +142,9 @@ static int alpn_select_proto_cb(SSL *ssl, const unsigned char **out,
+ /* Create SSL_CTX. */
+ static SSL_CTX *create_ssl_ctx(const char *key_file, const char *cert_file) {
+   SSL_CTX *ssl_ctx;
++#if OPENSSL_VERSION_NUMBER < 0x30000000L
+   EC_KEY *ecdh;
++#endif
+ 
+   ssl_ctx = SSL_CTX_new(SSLv23_server_method());
+   if (!ssl_ctx) {
+@@ -154,6 +156,7 @@ static SSL_CTX *create_ssl_ctx(const char *key_file, const char *cert_file) {
+                           SSL_OP_NO_COMPRESSION |
+                           SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
+ 
++#if OPENSSL_VERSION_NUMBER < 0x30000000L
+   ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+   if (!ecdh) {
+     errx(1, "EC_KEY_new_by_curv_name failed: %s",
+@@ -161,6 +164,9 @@ static SSL_CTX *create_ssl_ctx(const char *key_file, const char *cert_file) {
+   }
+   SSL_CTX_set_tmp_ecdh(ssl_ctx, ecdh);
+   EC_KEY_free(ecdh);
++#else
++  SSL_CTX_set1_groups_list(ssl_ctx, "P-256");
++#endif
+ 
+   if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM) != 1) {
+     errx(1, "Could not read private key file %s", key_file);
+diff --git a/src/HttpServer.cc b/src/HttpServer.cc
+index c882eb1..fb4dab8 100644
+--- a/src/HttpServer.cc
++++ b/src/HttpServer.cc
+@@ -52,8 +52,15 @@
+ #include <mutex>
+ #include <deque>
+ 
++#include "ssl_compat.h"
+ #include <openssl/err.h>
++#if !OPENSSL_3_0_API
+ #include <openssl/dh.h>
++#else
++#include <openssl/core_names.h>
++#include <openssl/decoder.h>
++#include <openssl/evp.h>
++#endif
+ 
+ #include <zlib.h>
+ 
+@@ -2147,6 +2154,7 @@ int HttpServer::run() {
+     // Disabled SSL_CTX_set_ecdh_auto, because computational cost of
+     // chosen curve is much higher than P-256.
+ 
++#if !OPENSSL_3_0_API
+     // #if OPENSSL_VERSION_NUMBER >= 0x10002000L
+     //     SSL_CTX_set_ecdh_auto(ssl_ctx, 1);
+     // #else // OPENSSL_VERSION_NUBMER < 0x10002000L
+@@ -2161,6 +2169,9 @@ int HttpServer::run() {
+     SSL_CTX_set_tmp_ecdh(ssl_ctx, ecdh);
+     EC_KEY_free(ecdh);
+     // #endif // OPENSSL_VERSION_NUBMER < 0x10002000L
++#else
++    SSL_CTX_set1_groups_list(ssl_ctx, "P-256");
++#endif // !OPENSSL_3_0_API
+ 
+ #endif // OPENSSL_NO_EC
+ 
+@@ -2173,6 +2184,7 @@ int HttpServer::run() {
+         return -1;
+       }
+ 
++#if !OPENSSL_3_0_API
+       auto dh = PEM_read_bio_DHparams(bio, nullptr, nullptr, nullptr);
+ 
+       if (dh == nullptr) {
+@@ -2183,6 +2195,30 @@ int HttpServer::run() {
+ 
+       SSL_CTX_set_tmp_dh(ssl_ctx, dh);
+       DH_free(dh);
++#else
++      EVP_PKEY *pkey = nullptr;
++      auto ctx = OSSL_DECODER_CTX_new_for_pkey(&pkey, "PEM", nullptr, "DH",
++                                               OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS,
++                                               nullptr, nullptr);
++      if (ctx == nullptr) {
++        std::cerr << "OSSL_DECODER_CTX_new_for_pkey() failed: "
++                  << ERR_error_string(ERR_get_error(), nullptr) << std::endl;
++        return -1;
++      }
++
++      if (!OSSL_DECODER_from_bio(ctx, bio)) {
++        std::cerr << "OSSL_DECODER_from_bio() failed: "
++                  << ERR_error_string(ERR_get_error(), nullptr) << std::endl;
++        return -1;
++      }
++
++      if (!SSL_CTX_set0_tmp_dh_pkey(ssl_ctx, pkey)) {
++        EVP_PKEY_free(pkey);
++      }
++
++      OSSL_DECODER_CTX_free(ctx);
++#endif // !OPENSSL_3_0_API
++
+       BIO_free(bio);
+     }
+ 
+diff --git a/src/h2load.cc b/src/h2load.cc
+index a0b5166..d8fc3d7 100644
+--- a/src/h2load.cc
++++ b/src/h2load.cc
+@@ -671,6 +671,12 @@ void print_server_tmp_key(SSL *ssl) {
+     std::cout << "DH " << EVP_PKEY_bits(key) << " bits" << std::endl;
+     break;
+   case EVP_PKEY_EC: {
++#if OPENSSL_3_0_API
++    char cname[128];
++    if (!EVP_PKEY_get_group_name(key, cname, sizeof(cname), NULL)) {
++      strcpy(cname, "Unknown");
++    }
++#else
+     auto ec = EVP_PKEY_get1_EC_KEY(key);
+     auto ec_del = defer(EC_KEY_free, ec);
+     auto nid = EC_GROUP_get_curve_name(EC_KEY_get0_group(ec));
+@@ -678,6 +684,7 @@ void print_server_tmp_key(SSL *ssl) {
+     if (!cname) {
+       cname = OBJ_nid2sn(nid);
+     }
++#endif
+ 
+     std::cout << "ECDH " << cname << " " << EVP_PKEY_bits(key) << " bits"
+               << std::endl;
+diff --git a/src/shrpx_tls.cc b/src/shrpx_tls.cc
+index 320087f..779ab92 100644
+--- a/src/shrpx_tls.cc
++++ b/src/shrpx_tls.cc
+@@ -48,6 +48,10 @@
+ #ifndef OPENSSL_NO_OCSP
+ #  include <openssl/ocsp.h>
+ #endif // OPENSSL_NO_OCSP
++#if OPENSSL_VERSION_NUMBER >= 0x30000000L
++#include <openssl/core_names.h>
++#include <openssl/decoder.h>
++#endif
+ 
+ #include <nghttp2/nghttp2.h>
+ 
+@@ -214,11 +218,19 @@ int servername_callback(SSL *ssl, int *al, void *arg) {
+         continue;
+       }
+ 
+-#  if OPENSSL_1_1_API
++#  if OPENSSL_3_0_API
++      char curve_name[128];
++      if (!EVP_PKEY_get_group_name(pubkey, curve_name,
++                                   sizeof(curve_name), NULL)) {
++        continue;
++      }
++      auto cert_curve = OBJ_txt2nid(curve_name);
++#  else
++#    if OPENSSL_1_1_API
+       auto eckey = EVP_PKEY_get0_EC_KEY(pubkey);
+-#  else  // !OPENSSL_1_1_API
++#    else  // !OPENSSL_1_1_API
+       auto eckey = EVP_PKEY_get1_EC_KEY(pubkey);
+-#  endif // !OPENSSL_1_1_API
++#    endif // !OPENSSL_1_1_API
+ 
+       if (eckey == nullptr) {
+         continue;
+@@ -227,10 +239,11 @@ int servername_callback(SSL *ssl, int *al, void *arg) {
+       auto ecgroup = EC_KEY_get0_group(eckey);
+       auto cert_curve = EC_GROUP_get_curve_name(ecgroup);
+ 
+-#  if !OPENSSL_1_1_API
++#    if !OPENSSL_1_1_API
+       EC_KEY_free(eckey);
+       EVP_PKEY_free(pubkey);
+-#  endif // !OPENSSL_1_1_API
++#    endif // !OPENSSL_1_1_API
++#  endif // !OPENSSL_3_0_API
+ 
+       if (shared_curve == cert_curve) {
+         SSL_set_SSL_CTX(ssl, ssl_ctx);
+@@ -449,11 +462,20 @@ SSL_SESSION *tls_session_get_cb(SSL *ssl,
+ 
+ namespace {
+ int ticket_key_cb(SSL *ssl, unsigned char *key_name, unsigned char *iv,
+-                  EVP_CIPHER_CTX *ctx, HMAC_CTX *hctx, int enc) {
++                  EVP_CIPHER_CTX *ctx,
++#if OPENSSL_3_0_API
++                  EVP_MAC_CTX *mac_ctx,
++#else
++                  HMAC_CTX *hctx,
++#endif
++                  int enc) {
+   auto conn = static_cast<Connection *>(SSL_get_app_data(ssl));
+   auto handler = static_cast<ClientHandler *>(conn->data);
+   auto worker = handler->get_worker();
+   auto ticket_keys = worker->get_ticket_keys();
++#if OPENSSL_3_0_API
++  OSSL_PARAM params[3];
++#endif
+ 
+   if (!ticket_keys) {
+     // No ticket keys available.
+@@ -482,8 +504,19 @@ int ticket_key_cb(SSL *ssl, unsigned char *key_name, unsigned char *iv,
+ 
+     EVP_EncryptInit_ex(ctx, get_config()->tls.ticket.cipher, nullptr,
+                        key.data.enc_key.data(), iv);
++#if OPENSSL_3_0_API
++    params[0] = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY,
++                                                  key.data.hmac_key.data(),
++                                                  key.hmac_keylen);
++    params[1] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
++                                                 (char *) EVP_MD_name(key.hmac),
++                                                 0);
++    params[2] = OSSL_PARAM_construct_end();
++    EVP_MAC_CTX_set_params(mac_ctx, params);
++#else
+     HMAC_Init_ex(hctx, key.data.hmac_key.data(), key.hmac_keylen, key.hmac,
+                  nullptr);
++#endif
+     return 1;
+   }
+ 
+@@ -510,8 +543,19 @@ int ticket_key_cb(SSL *ssl, unsigned char *key_name, unsigned char *iv,
+   }
+ 
+   auto &key = keys[i];
++#if OPENSSL_3_0_API
++  params[0] = OSSL_PARAM_construct_octet_string(OSSL_MAC_PARAM_KEY,
++                                                key.data.hmac_key.data(),
++                                                key.hmac_keylen);
++  params[1] = OSSL_PARAM_construct_utf8_string(OSSL_MAC_PARAM_DIGEST,
++                                               (char *) EVP_MD_name(key.hmac),
++                                               0);
++  params[2] = OSSL_PARAM_construct_end();
++  EVP_MAC_CTX_set_params(mac_ctx, params);
++#else
+   HMAC_Init_ex(hctx, key.data.hmac_key.data(), key.hmac_keylen, key.hmac,
+                nullptr);
++#endif
+   EVP_DecryptInit_ex(ctx, key.cipher, nullptr, key.data.enc_key.data(), iv);
+ 
+   return i == 0 ? 1 : 2;
+@@ -855,6 +899,29 @@ SSL_CTX *create_ssl_context(const char *private_key_file, const char *cert_file,
+                  << ERR_error_string(ERR_get_error(), nullptr);
+       DIE();
+     }
++#if OPENSSL_3_0_API
++    EVP_PKEY *pkey = nullptr;
++    auto ctx = OSSL_DECODER_CTX_new_for_pkey(&pkey, "PEM", nullptr, "DH",
++                                             OSSL_KEYMGMT_SELECT_DOMAIN_PARAMETERS,
++                                             nullptr, nullptr);
++    if (ctx == nullptr) {
++      LOG(FATAL) << "OSSL_DECODER_CTX_new_for_pkey() failed: "
++                 << ERR_error_string(ERR_get_error(), nullptr);
++      DIE();
++    }
++
++    if (!OSSL_DECODER_from_bio(ctx, bio)) {
++      LOG(FATAL) << "OSSL_DECODER_from_bio() failed: "
++                 << ERR_error_string(ERR_get_error(), nullptr);
++      DIE();
++    }
++
++    if (!SSL_CTX_set0_tmp_dh_pkey(ssl_ctx, pkey)) {
++      EVP_PKEY_free(pkey);
++    }
++
++    OSSL_DECODER_CTX_free(ctx);
++#else
+     auto dh = PEM_read_bio_DHparams(bio, nullptr, nullptr, nullptr);
+     if (dh == nullptr) {
+       LOG(FATAL) << "PEM_read_bio_DHparams() failed: "
+@@ -863,6 +930,7 @@ SSL_CTX *create_ssl_context(const char *private_key_file, const char *cert_file,
+     }
+     SSL_CTX_set_tmp_dh(ssl_ctx, dh);
+     DH_free(dh);
++#endif // !OPENSSL_3_0_API
+     BIO_free(bio);
+   }
+ 
+diff --git a/src/ssl_compat.h b/src/ssl_compat.h
+index 9574b7c..8ea72b5 100644
+--- a/src/ssl_compat.h
++++ b/src/ssl_compat.h
+@@ -29,12 +29,14 @@
+ #  if defined(LIBRESSL_VERSION_NUMBER)
+ #    define OPENSSL_1_1_API 0
+ #    define OPENSSL_1_1_1_API 0
++#    define OPENSSL_3_0_API 0
+ #    define LIBRESSL_IN_USE 1
+ #    define LIBRESSL_LEGACY_API (LIBRESSL_VERSION_NUMBER < 0x20700000L)
+ #    define LIBRESSL_2_7_API (LIBRESSL_VERSION_NUMBER >= 0x20700000L)
+ #  else // !defined(LIBRESSL_VERSION_NUMBER)
+ #    define OPENSSL_1_1_API (OPENSSL_VERSION_NUMBER >= 0x1010000fL)
+ #    define OPENSSL_1_1_1_API (OPENSSL_VERSION_NUMBER >= 0x10101000L)
++#    define OPENSSL_3_0_API (OPENSSL_VERSION_NUMBER >= 0x30000000L)
+ #    define LIBRESSL_IN_USE 0
+ #    define LIBRESSL_LEGACY_API 0
+ #    define LIBRESSL_2_7_API 0

@@ -1,6 +1,7 @@
 nghttp2 (1.36.0-2+deb10u1pexip3) pexip; urgency=medium
 
   * Build-Depend on libssl-dev 3
+  * d/p/openssl3-support.patch: Remove use of APIs deprecated in OpenSSL 3.0
 
  -- John-Mark Bell <jmb@pexip.com>  Mon, 17 May 2021 16:48:15 +0100
 
