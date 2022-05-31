@@ -23,7 +23,7 @@ Standards-Version: 4.3.0
 Vcs-Browser: https://salsa.debian.org/debian/nghttp2
 Vcs-Git: https://salsa.debian.org/debian/nghttp2.git
 Homepage: https://nghttp2.org/
-XS-Pexip-Upstream: http://ftp.debian.org/debian/ buster
+XS-Pexip-Upstream: http://deb.debian.org/debian/ bullseye
 
 Package: libnghttp2-dev
 Architecture: any
