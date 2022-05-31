@@ -123,13 +123,13 @@ Connections
     "sni=<SNI_HOST>",         "fall=<N>",        "rise=<N>",
     "affinity=<METHOD>",    "dns",    "redirect-if-not-tls",
     "upgrade-scheme",                        "mruby=<PATH>",
-    "read-timeout=<DURATION>",                           and
-    "write-timeout=<DURATION>".   The parameter  consists of
-    keyword, and optionally followed  by "=" and value.  For
-    example,  the  parameter   "proto=h2"  consists  of  the
-    keyword  "proto" and  value "h2".   The parameter  "tls"
-    consists  of  the  keyword "tls"  without  value.   Each
-    parameter is described as follows.
+    "read-timeout=<DURATION>",   "write-timeout=<DURATION>",
+    "group=<GROUP>",  "group-weight=<N>", and  "weight=<N>".
+    The  parameter  consists   of  keyword,  and  optionally
+    followed by  "=" and value.  For  example, the parameter
+    "proto=h2"  consists of  the keyword  "proto" and  value
+    "h2".  The parameter "tls" consists of the keyword "tls"
+    without value.  Each parameter is described as follows.
 
     The backend application protocol  can be specified using
     optional  "proto"   parameter,  and   in  the   form  of
@@ -235,9 +235,37 @@ Connections
     pattern,            :option:`--backend-read-timeout`           and
     :option:`--backend-write-timeout` are used.
 
+    "group=<GROUP>"  parameter specifies  the name  of group
+    this backend address belongs to.  By default, it belongs
+    to  the unnamed  default group.   The name  of group  is
+    unique   per   pattern.   "group-weight=<N>"   parameter
+    specifies the  weight of  the group.  The  higher weight
+    gets  more frequently  selected  by  the load  balancing
+    algorithm.  <N> must be  [1, 256] inclusive.  The weight
+    8 has 4 times more weight  than 2.  <N> must be the same
+    for  all addresses  which  share the  same <GROUP>.   If
+    "group-weight" is  omitted in an address,  but the other
+    address  which  belongs  to  the  same  group  specifies
+    "group-weight",   its    weight   is   used.     If   no
+    "group-weight"  is  specified  for  all  addresses,  the
+    weight of a group becomes 1.  "group" and "group-weight"
+    are ignored if session affinity is enabled.
+
+    "weight=<N>"  parameter  specifies  the  weight  of  the
+    backend  address  inside  a  group  which  this  address
+    belongs  to.  The  higher  weight  gets more  frequently
+    selected by  the load balancing algorithm.   <N> must be
+    [1,  256] inclusive.   The  weight 8  has  4 times  more
+    weight  than weight  2.  If  this parameter  is omitted,
+    weight  becomes  1.   "weight"  is  ignored  if  session
+    affinity is enabled.
+
     Since ";" and ":" are  used as delimiter, <PATTERN> must
-    not  contain these  characters.  Since  ";" has  special
-    meaning in shell, the option value must be quoted.
+    not contain  these characters.  In order  to include ":"
+    in  <PATTERN>,  one  has  to  specify  "%3A"  (which  is
+    percent-encoded  from of  ":") instead.   Since ";"  has
+    special  meaning  in shell,  the  option  value must  be
+    quoted.
 
 
     Default: ``127.0.0.1,80``
@@ -275,7 +303,7 @@ Connections
     default.  Any  requests which come through  this address
     are replied with 200 HTTP status, without no body.
 
-    To  accept   PROXY  protocol   version  1   on  frontend
+    To accept  PROXY protocol  version 1  and 2  on frontend
     connection,  specify  "proxyproto" parameter.   This  is
     disabled by default.
 
@@ -1178,6 +1206,14 @@ Logging
       request.  "-" if backend host is not available.
     * $backend_port:  backend  port   used  to  fulfill  the
       request.  "-" if backend host is not available.
+    * $method: HTTP method
+    * $path:  Request  path  including query.   For  CONNECT
+      request, authority is recorded.
+    * $path_without_query:  $path   up  to  the   first  '?'
+      character.    For   CONNECT  request,   authority   is
+      recorded.
+    * $protocol_version:   HTTP  version   (e.g.,  HTTP/1.1,
+      HTTP/2)
 
     The  variable  can  be  enclosed  by  "{"  and  "}"  for
     disambiguation (e.g., ${remote_addr}).

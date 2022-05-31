@@ -45,17 +45,43 @@
 #include "util.h"
 #include "template.h"
 #include "base64.h"
+#include "url-parser/url_parser.h"
 
 using namespace nghttp2;
 
 namespace shrpx {
+
+namespace {
+int htp_msg_begin(llhttp_t *htp);
+int htp_uricb(llhttp_t *htp, const char *data, size_t len);
+int htp_hdr_keycb(llhttp_t *htp, const char *data, size_t len);
+int htp_hdr_valcb(llhttp_t *htp, const char *data, size_t len);
+int htp_hdrs_completecb(llhttp_t *htp);
+int htp_bodycb(llhttp_t *htp, const char *data, size_t len);
+int htp_msg_completecb(llhttp_t *htp);
+} // namespace
+
+namespace {
+constexpr llhttp_settings_t htp_hooks = {
+    htp_msg_begin,       // llhttp_cb      on_message_begin;
+    htp_uricb,           // llhttp_data_cb on_url;
+    nullptr,             // llhttp_data_cb on_status;
+    htp_hdr_keycb,       // llhttp_data_cb on_header_field;
+    htp_hdr_valcb,       // llhttp_data_cb on_header_value;
+    htp_hdrs_completecb, // llhttp_cb      on_headers_complete;
+    htp_bodycb,          // llhttp_data_cb on_body;
+    htp_msg_completecb,  // llhttp_cb      on_message_complete;
+    nullptr,             // llhttp_cb      on_chunk_header;
+    nullptr,             // llhttp_cb      on_chunk_complete;
+};
+} // namespace
 
 HttpsUpstream::HttpsUpstream(ClientHandler *handler)
     : handler_(handler),
       current_header_length_(0),
       ioctrl_(handler->get_rlimit()),
       num_requests_(0) {
-  http_parser_init(&htp_, HTTP_REQUEST);
+  llhttp_init(&htp_, HTTP_REQUEST, &htp_hooks);
   htp_.data = this;
 }
 
@@ -87,7 +113,7 @@ void HttpsUpstream::on_start_request() {
 }
 
 namespace {
-int htp_msg_begin(http_parser *htp) {
+int htp_msg_begin(llhttp_t *htp) {
   auto upstream = static_cast<HttpsUpstream *>(htp->data);
   upstream->on_start_request();
   return 0;
@@ -95,7 +121,7 @@ int htp_msg_begin(http_parser *htp) {
 } // namespace
 
 namespace {
-int htp_uricb(http_parser *htp, const char *data, size_t len) {
+int htp_uricb(llhttp_t *htp, const char *data, size_t len) {
   auto upstream = static_cast<HttpsUpstream *>(htp->data);
   auto downstream = upstream->get_downstream();
   auto &req = downstream->request();
@@ -114,7 +140,8 @@ int htp_uricb(http_parser *htp, const char *data, size_t len) {
     assert(downstream->get_request_state() == DownstreamState::INITIAL);
     downstream->set_request_state(
         DownstreamState::HTTP1_REQUEST_HEADER_TOO_LARGE);
-    return -1;
+    llhttp_set_error_reason(htp, "too long request URI");
+    return HPE_USER;
   }
 
   req.fs.add_extra_buffer_size(len);
@@ -131,7 +158,7 @@ int htp_uricb(http_parser *htp, const char *data, size_t len) {
 } // namespace
 
 namespace {
-int htp_hdr_keycb(http_parser *htp, const char *data, size_t len) {
+int htp_hdr_keycb(llhttp_t *htp, const char *data, size_t len) {
   auto upstream = static_cast<HttpsUpstream *>(htp->data);
   auto downstream = upstream->get_downstream();
   auto &req = downstream->request();
@@ -146,7 +173,8 @@ int htp_hdr_keycb(http_parser *htp, const char *data, size_t len) {
       downstream->set_request_state(
           DownstreamState::HTTP1_REQUEST_HEADER_TOO_LARGE);
     }
-    return -1;
+    llhttp_set_error_reason(htp, "too large header");
+    return HPE_USER;
   }
   if (downstream->get_request_state() == DownstreamState::INITIAL) {
     if (req.fs.header_key_prev()) {
@@ -159,7 +187,8 @@ int htp_hdr_keycb(http_parser *htp, const char *data, size_t len) {
         }
         downstream->set_request_state(
             DownstreamState::HTTP1_REQUEST_HEADER_TOO_LARGE);
-        return -1;
+        llhttp_set_error_reason(htp, "too many headers");
+        return HPE_USER;
       }
       req.fs.alloc_add_header_name(StringRef{data, len});
     }
@@ -173,7 +202,8 @@ int htp_hdr_keycb(http_parser *htp, const char *data, size_t len) {
           ULOG(INFO, upstream)
               << "Too many header field num=" << req.fs.num_fields() + 1;
         }
-        return -1;
+        llhttp_set_error_reason(htp, "too many headers");
+        return HPE_USER;
       }
       req.fs.alloc_add_trailer_name(StringRef{data, len});
     }
@@ -183,7 +213,7 @@ int htp_hdr_keycb(http_parser *htp, const char *data, size_t len) {
 } // namespace
 
 namespace {
-int htp_hdr_valcb(http_parser *htp, const char *data, size_t len) {
+int htp_hdr_valcb(llhttp_t *htp, const char *data, size_t len) {
   auto upstream = static_cast<HttpsUpstream *>(htp->data);
   auto downstream = upstream->get_downstream();
   auto &req = downstream->request();
@@ -198,7 +228,8 @@ int htp_hdr_valcb(http_parser *htp, const char *data, size_t len) {
       downstream->set_request_state(
           DownstreamState::HTTP1_REQUEST_HEADER_TOO_LARGE);
     }
-    return -1;
+    llhttp_set_error_reason(htp, "too large header");
+    return HPE_USER;
   }
   if (downstream->get_request_state() == DownstreamState::INITIAL) {
     req.fs.append_last_header_value(data, len);
@@ -286,7 +317,7 @@ void rewrite_request_host_path_from_uri(BlockAllocator &balloc, Request &req,
 } // namespace
 
 namespace {
-int htp_hdrs_completecb(http_parser *htp) {
+int htp_hdrs_completecb(llhttp_t *htp) {
   int rv;
   auto upstream = static_cast<HttpsUpstream *>(htp->data);
   if (LOG_ENABLED(INFO)) {
@@ -305,7 +336,7 @@ int htp_hdrs_completecb(http_parser *htp) {
   req.http_major = htp->http_major;
   req.http_minor = htp->http_minor;
 
-  req.connection_close = !http_should_keep_alive(htp);
+  req.connection_close = !llhttp_should_keep_alive(htp);
 
   handler->stop_read_timer();
 
@@ -318,6 +349,10 @@ int htp_hdrs_completecb(http_parser *htp) {
        << "HTTP/" << req.http_major << "." << req.http_minor << "\n";
 
     for (const auto &kv : req.fs.headers()) {
+      if (kv.name == "authorization") {
+        ss << TTY_HTTP_HD << kv.name << TTY_RST << ": <redacted>\n";
+        continue;
+      }
       ss << TTY_HTTP_HD << kv.name << TTY_RST << ": " << kv.value << "\n";
     }
 
@@ -328,15 +363,11 @@ int htp_hdrs_completecb(http_parser *htp) {
   // transfer-encoding is given.  If transfer-encoding is given, leave
   // req.fs.content_length to -1.
   if (method != HTTP_CONNECT && !req.fs.header(http2::HD_TRANSFER_ENCODING)) {
-    // http-parser returns (uint64_t)-1 if there is no content-length
-    // header field.  If we don't have both transfer-encoding, and
-    // content-length header field, we assume that there is no request
-    // body.
-    if (htp->content_length == std::numeric_limits<uint64_t>::max()) {
-      req.fs.content_length = 0;
-    } else {
-      req.fs.content_length = htp->content_length;
-    }
+    // llhttp sets 0 to htp->content_length if there is no
+    // content-length header field.  If we don't have both
+    // transfer-encoding and content-length header field, we assume
+    // that there is no request body.
+    req.fs.content_length = htp->content_length;
   }
 
   auto host = req.fs.header(http2::HD_HOST);
@@ -426,30 +457,31 @@ int htp_hdrs_completecb(http_parser *htp) {
     return 0;
   }
 
-  auto dconn = handler->get_downstream_connection(rv, downstream);
+  DownstreamConnection *dconn_ptr;
 
-  if (!dconn) {
-    if (rv == SHRPX_ERR_TLS_REQUIRED) {
-      upstream->redirect_to_https(downstream);
+  for (;;) {
+    auto dconn = handler->get_downstream_connection(rv, downstream);
+
+    if (!dconn) {
+      if (rv == SHRPX_ERR_TLS_REQUIRED) {
+        upstream->redirect_to_https(downstream);
+      }
+      downstream->set_request_state(DownstreamState::CONNECT_FAIL);
+      return -1;
     }
-    downstream->set_request_state(DownstreamState::CONNECT_FAIL);
-
-    return -1;
-  }
 
 #ifdef HAVE_MRUBY
-  auto dconn_ptr = dconn.get();
+    dconn_ptr = dconn.get();
 #endif // HAVE_MRUBY
-  if (downstream->attach_downstream_connection(std::move(dconn)) != 0) {
-    downstream->set_request_state(DownstreamState::CONNECT_FAIL);
-
-    return -1;
+    if (downstream->attach_downstream_connection(std::move(dconn)) == 0) {
+      break;
+    }
   }
 
 #ifdef HAVE_MRUBY
   const auto &group = dconn_ptr->get_downstream_addr_group();
   if (group) {
-    const auto &dmruby_ctx = group->mruby_ctx;
+    const auto &dmruby_ctx = group->shared_addr->mruby_ctx;
 
     if (dmruby_ctx->run_on_request_proc(downstream) != 0) {
       resp.http_status = 500;
@@ -473,9 +505,7 @@ int htp_hdrs_completecb(http_parser *htp) {
     // and let them decide whether responds with 100 Continue or not.
     // For alternative mode, we have no backend, so just send 100
     // Continue here to make the client happy.
-    auto expect = req.fs.header(http2::HD_EXPECT);
-    if (expect &&
-        util::strieq(expect->value, StringRef::from_lit("100-continue"))) {
+    if (downstream->get_expect_100_continue()) {
       auto output = downstream->get_response_buf();
       constexpr auto res = StringRef::from_lit("HTTP/1.1 100 Continue\r\n\r\n");
       output->append(res);
@@ -488,7 +518,7 @@ int htp_hdrs_completecb(http_parser *htp) {
 } // namespace
 
 namespace {
-int htp_bodycb(http_parser *htp, const char *data, size_t len) {
+int htp_bodycb(llhttp_t *htp, const char *data, size_t len) {
   int rv;
   auto upstream = static_cast<HttpsUpstream *>(htp->data);
   auto downstream = upstream->get_downstream();
@@ -501,14 +531,15 @@ int htp_bodycb(http_parser *htp, const char *data, size_t len) {
       return 0;
     }
 
-    return -1;
+    llhttp_set_error_reason(htp, "could not process request body");
+    return HPE_USER;
   }
   return 0;
 }
 } // namespace
 
 namespace {
-int htp_msg_completecb(http_parser *htp) {
+int htp_msg_completecb(llhttp_t *htp) {
   int rv;
   auto upstream = static_cast<HttpsUpstream *>(htp->data);
   if (LOG_ENABLED(INFO)) {
@@ -526,11 +557,10 @@ int htp_msg_completecb(http_parser *htp) {
       // next request handling (if we don't close the connection).  We
       // first pause parser here just as we normally do, and call
       // signal_write() to run on_write().
-      http_parser_pause(htp, 1);
-
-      return 0;
+      return HPE_PAUSED;
     }
-    return -1;
+    llhttp_set_error_reason(htp, "could not finish request body");
+    return HPE_USER;
   }
 
   if (handler->get_http2_upgrade_allowed() &&
@@ -542,22 +572,8 @@ int htp_msg_completecb(http_parser *htp) {
   }
 
   // Stop further processing to complete this request
-  http_parser_pause(htp, 1);
-  return 0;
+  return HPE_PAUSED;
 }
-} // namespace
-
-namespace {
-constexpr http_parser_settings htp_hooks = {
-    htp_msg_begin,       // http_cb      on_message_begin;
-    htp_uricb,           // http_data_cb on_url;
-    nullptr,             // http_data_cb on_status;
-    htp_hdr_keycb,       // http_data_cb on_header_field;
-    htp_hdr_valcb,       // http_data_cb on_header_value;
-    htp_hdrs_completecb, // http_cb      on_headers_complete;
-    htp_bodycb,          // http_data_cb on_body;
-    htp_msg_completecb   // http_cb      on_message_complete;
-};
 } // namespace
 
 // on_read() does not consume all available data in input buffer if
@@ -572,7 +588,7 @@ int HttpsUpstream::on_read() {
   }
 
   // downstream can be nullptr here, because it is initialized in the
-  // callback chain called by http_parser_execute()
+  // callback chain called by llhttp_execute()
   if (downstream && downstream->get_upgraded()) {
 
     auto rv = downstream->push_upload_data_chunk(rb->pos(), rb->rleft());
@@ -607,11 +623,15 @@ int HttpsUpstream::on_read() {
     }
   }
 
-  // http_parser_execute() does nothing once it entered error state.
-  auto nread = http_parser_execute(&htp_, &htp_hooks,
-                                   reinterpret_cast<const char *>(rb->pos()),
-                                   rb->rleft());
+  // llhttp_execute() does nothing once it entered error state.
+  auto htperr = llhttp_execute(&htp_, reinterpret_cast<const char *>(rb->pos()),
+                               rb->rleft());
 
+  auto nread =
+      htperr == HPE_OK
+          ? rb->rleft()
+          : reinterpret_cast<const uint8_t *>(llhttp_get_error_pos(&htp_)) -
+                rb->pos();
   rb->drain(nread);
   rlimit->startw();
 
@@ -621,8 +641,6 @@ int HttpsUpstream::on_read() {
   // Get downstream again because it may be initialized in http parser
   // execution
   downstream = get_downstream();
-
-  auto htperr = HTTP_PARSER_ERRNO(&htp_);
 
   if (htperr == HPE_PAUSED) {
     // We may pause parser in htp_msg_completecb when both side are
@@ -638,8 +656,8 @@ int HttpsUpstream::on_read() {
   if (htperr != HPE_OK) {
     if (LOG_ENABLED(INFO)) {
       ULOG(INFO, this) << "HTTP parse failure: "
-                       << "(" << http_errno_name(htperr) << ") "
-                       << http_errno_description(htperr);
+                       << "(" << llhttp_errno_name(htperr) << ") "
+                       << llhttp_get_error_reason(&htp_);
     }
 
     if (downstream &&
@@ -753,7 +771,7 @@ int HttpsUpstream::resume_read(IOCtrlReason reason, Downstream *downstream,
   if (ioctrl_.resume_read(reason)) {
     // Process remaining data in input buffer here because these bytes
     // are not notified by readcb until new data arrive.
-    http_parser_pause(&htp_, 0);
+    llhttp_resume(&htp_);
 
     auto conn = handler_->get_connection();
     ev_feed_event(conn->loop, &conn->rev, EV_READ);
@@ -770,7 +788,10 @@ int HttpsUpstream::downstream_read(DownstreamConnection *dconn) {
   rv = downstream->on_read();
 
   if (rv == SHRPX_ERR_EOF) {
-    return downstream_eof(dconn);
+    if (downstream->get_request_header_sent()) {
+      return downstream_eof(dconn);
+    }
+    return SHRPX_ERR_RETRY;
   }
 
   if (rv == SHRPX_ERR_DCONN_CANCELED) {
@@ -875,7 +896,11 @@ int HttpsUpstream::downstream_error(DownstreamConnection *dconn, int events) {
 
   unsigned int status;
   if (events & Downstream::EVENT_TIMEOUT) {
-    status = 504;
+    if (downstream->get_request_header_sent()) {
+      status = 504;
+    } else {
+      status = 408;
+    }
   } else {
     status = 502;
   }
@@ -1062,7 +1087,7 @@ int HttpsUpstream::on_downstream_header_complete(Downstream *downstream) {
     assert(dconn);
     const auto &group = dconn->get_downstream_addr_group();
     if (group) {
-      const auto &dmruby_ctx = group->mruby_ctx;
+      const auto &dmruby_ctx = group->shared_addr->mruby_ctx;
 
       if (dmruby_ctx->run_on_response_proc(downstream) != 0) {
         error_reply(500);
@@ -1427,14 +1452,16 @@ int HttpsUpstream::on_downstream_reset(Downstream *downstream, bool no_retry) {
     goto fail;
   }
 
-  dconn = handler_->get_downstream_connection(rv, downstream_.get());
-  if (!dconn) {
-    goto fail;
-  }
+  for (;;) {
+    auto dconn = handler_->get_downstream_connection(rv, downstream_.get());
+    if (!dconn) {
+      goto fail;
+    }
 
-  rv = downstream_->attach_downstream_connection(std::move(dconn));
-  if (rv != 0) {
-    goto fail;
+    rv = downstream_->attach_downstream_connection(std::move(dconn));
+    if (rv == 0) {
+      break;
+    }
   }
 
   rv = downstream_->push_request_headers();

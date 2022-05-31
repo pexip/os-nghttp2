@@ -1537,9 +1537,84 @@ StringRef extract_host(const StringRef &hostport) {
   return StringRef{std::begin(hostport), p};
 }
 
+std::pair<StringRef, StringRef> split_hostport(const StringRef &hostport) {
+  if (hostport.empty()) {
+    return {};
+  }
+  if (hostport[0] == '[') {
+    // assume this is IPv6 numeric address
+    auto p = std::find(std::begin(hostport), std::end(hostport), ']');
+    if (p == std::end(hostport)) {
+      return {};
+    }
+    if (p + 1 == std::end(hostport)) {
+      return {StringRef{std::begin(hostport) + 1, p}, {}};
+    }
+    if (*(p + 1) != ':' || p + 2 == std::end(hostport)) {
+      return {};
+    }
+    return {StringRef{std::begin(hostport) + 1, p},
+            StringRef{p + 2, std::end(hostport)}};
+  }
+
+  auto p = std::find(std::begin(hostport), std::end(hostport), ':');
+  if (p == std::begin(hostport)) {
+    return {};
+  }
+  if (p == std::end(hostport)) {
+    return {StringRef{std::begin(hostport), p}, {}};
+  }
+  if (p + 1 == std::end(hostport)) {
+    return {};
+  }
+
+  return {StringRef{std::begin(hostport), p},
+          StringRef{p + 1, std::end(hostport)}};
+}
+
 std::mt19937 make_mt19937() {
   std::random_device rd;
   return std::mt19937(rd());
+}
+
+int daemonize(int nochdir, int noclose) {
+#if defined(__APPLE__)
+  pid_t pid;
+  pid = fork();
+  if (pid == -1) {
+    return -1;
+  } else if (pid > 0) {
+    _exit(EXIT_SUCCESS);
+  }
+  if (setsid() == -1) {
+    return -1;
+  }
+  pid = fork();
+  if (pid == -1) {
+    return -1;
+  } else if (pid > 0) {
+    _exit(EXIT_SUCCESS);
+  }
+  if (nochdir == 0) {
+    if (chdir("/") == -1) {
+      return -1;
+    }
+  }
+  if (noclose == 0) {
+    if (freopen("/dev/null", "r", stdin) == nullptr) {
+      return -1;
+    }
+    if (freopen("/dev/null", "w", stdout) == nullptr) {
+      return -1;
+    }
+    if (freopen("/dev/null", "w", stderr) == nullptr) {
+      return -1;
+    }
+  }
+  return 0;
+#else  // !defined(__APPLE__)
+  return daemon(nochdir, noclose);
+#endif // !defined(__APPLE__)
 }
 
 } // namespace util

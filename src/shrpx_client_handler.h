@@ -77,6 +77,7 @@ public:
   int upstream_write();
 
   int proxy_protocol_read();
+  int proxy_protocol_v2_read();
   int on_proxy_protocol_finish();
 
   // Performs I/O operation.  Internally calls on_read()/on_write().
@@ -99,14 +100,14 @@ public:
 
   void pool_downstream_connection(std::unique_ptr<DownstreamConnection> dconn);
   void remove_downstream_connection(DownstreamConnection *dconn);
+  DownstreamAddr *get_downstream_addr(int &err, DownstreamAddrGroup *group,
+                                      Downstream *downstream);
   // Returns DownstreamConnection object based on request path.  This
   // function returns non-null DownstreamConnection, and assigns 0 to
   // |err| if it succeeds, or returns nullptr, and assigns negative
-  // error code to |err|.  If |pref_proto| is not PROTO_NONE, choose
-  // backend whose protocol is |pref_proto|.
+  // error code to |err|.
   std::unique_ptr<DownstreamConnection>
-  get_downstream_connection(int &err, Downstream *downstream,
-                            Proto pref_proto = Proto::NONE);
+  get_downstream_connection(int &err, Downstream *downstream);
   MemchunkPool *get_mcpool();
   SSL *get_ssl() const;
   // Call this function when HTTP/2 connection header is received at
@@ -150,10 +151,8 @@ public:
   StringRef get_forwarded_for() const;
 
   Http2Session *
-  select_http2_session(const std::shared_ptr<DownstreamAddrGroup> &group);
-
-  Http2Session *select_http2_session_with_affinity(
-      const std::shared_ptr<DownstreamAddrGroup> &group, DownstreamAddr *addr);
+  get_http2_session(const std::shared_ptr<DownstreamAddrGroup> &group,
+                    DownstreamAddr *addr);
 
   // Returns an affinity cookie value for |downstream|.  |cookie_name|
   // is used to inspect cookie header field in request header fields.

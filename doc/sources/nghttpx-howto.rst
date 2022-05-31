@@ -401,6 +401,9 @@ like so:
 
    frontend=*,443;proxyproto
 
+nghttpx supports both PROXY protocol v1 and v2.  AF_UNIX in PROXY
+protocol version 2 is ignored.
+
 Session affinity
 ----------------
 
@@ -497,6 +500,14 @@ Because TLSv1.3 completely changes the semantics of cipher suite
 naming scheme and structure, nghttpx provides the new option
 :option:`--tls13-ciphers` and :option:`--tls13-client-ciphers` to
 change preferred cipher list for TLSv1.3.
+
+WebSockets over HTTP/2
+----------------------
+
+nghttpx supports `RFC 8441 <https://tools.ietf.org/html/rfc8441>`_
+Bootstrapping WebSockets with HTTP/2 for both frontend and backend
+connections.  This feature is enabled by default and no configuration
+is required.
 
 Migration from nghttpx v1.18.x or earlier
 -----------------------------------------

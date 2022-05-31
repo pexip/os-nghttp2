@@ -21,7 +21,7 @@ class Interpreter
   }
   def interpret(string)
     @ret = ""
-    string.each_char {|b| Dispatcher[b].bind(self).call }
+    string.split("").each {|b| Dispatcher[b].bind(self).call }
   end
 end
 
@@ -371,6 +371,25 @@ assert "Method#initialize_copy" do
   assert_equal(m1, m2)
 end
 
+assert "Method#<< and Method#>>" do
+  obj = Object.new
+  class << obj
+    def mul2(n); n * 2; end
+    def add3(n); n + 3; end
+  end
+
+  f = obj.method(:mul2)
+  g = obj.method(:add3)
+
+  m1 = f << g
+  assert_kind_of Proc, m1
+  assert_equal 16, m1.call(5)
+
+  m2 = f >> g
+  assert_kind_of Proc, m2
+  assert_equal 13, m2.call(5)
+end
+
 assert 'UnboundMethod#arity' do
   c = Class.new {
     def foo(a, b)
@@ -421,4 +440,12 @@ assert 'UnboundMethod#bind' do
   assert_raise(TypeError) { sc.instance_method(:foo).bind([]) }
   assert_raise(TypeError) { Array.instance_method(:each).bind(1) }
   assert_kind_of Method, Object.instance_method(:object_id).bind(Object.new)
+end
+
+assert 'UnboundMethod#bind_call' do
+  m = Array.instance_method(:size)
+  assert_equal(:size, m.name)
+  assert_equal(0, m.bind_call([]))
+  assert_equal(1, m.bind_call([1]))
+  assert_equal(2, m.bind_call([1,2]))
 end

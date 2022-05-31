@@ -180,7 +180,9 @@ public:
     }
   }
   static void set_severity_level(int severity);
-  static int set_severity_level_by_name(const StringRef &name);
+  // Returns the severity level by |name|.  Returns -1 if |name| is
+  // unknown.
+  static int get_severity_level_by_name(const StringRef &name);
   static bool log_enabled(int severity) { return severity >= severity_thres_; }
 
   enum {
@@ -247,6 +249,10 @@ enum class LogFragmentType {
   TLS_CLIENT_SUBJECT_NAME,
   BACKEND_HOST,
   BACKEND_PORT,
+  METHOD,
+  PATH,
+  PATH_WITHOUT_QUERY,
+  PROTOCOL_VERSION,
 };
 
 struct LogFragment {
