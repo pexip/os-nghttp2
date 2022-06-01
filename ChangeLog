@@ -1,318 +1,239 @@
-commit e7e8ee5fe6e84ae3574c6eceab5efd7c251e98ed (HEAD, tag: v1.36.0, origin/master, origin/HEAD, master)
+commit fb0bd22979711c89d92d98ac5db57ebc6f4fd148 (HEAD, tag: v1.43.0, origin/master, origin/HEAD, master)
 Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-18
+AuthorDate: 2021-02-02
 Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-18
-
-    Update bash_completion
-
-commit b3b4e33535ac359be8826090b66846e5457d1dc5
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-18
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-18
+CommitDate: 2021-02-02
 
     Update manual pages
 
-commit bd93d90a899a29c73909fc3bf43a8b3bdb0c0095
+commit 3dc6c0afa2ed8b80b1f219813539db28f70886a3
 Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-18
+AuthorDate: 2021-02-02
 Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-18
+CommitDate: 2021-02-02
 
-    Don't treat text as option if it matches -[0-9]
-    
-    -[0-9] is valid option, but we don't use them so far and don't want to
-     mark integer -1 as option.
+    Bump version number to 1.43.0
 
-commit ea69c84b3341c916a8088677f8028b8b4535c129
+commit e8762781a72bf9220ec4de4e1c540d046051bb0a
 Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-18
+AuthorDate: 2021-02-02
 Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-18
-
-    Bump up version number to 1.36.0
-
-commit 783b649bb1e13240f42d9401a5560a24c852086e
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-18
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-18
+CommitDate: 2021-02-02
 
     Update AUTHORS
 
-commit eb21e6f8f73cf037ad9004ed9f85be07901fbce4
-Merge: 439dbce6 ab2aa567
+commit 2bf841e22ae1fc27b9f4881cdc63020511ec047a
 Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-17
+AuthorDate: 2021-01-17
 Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-17
+CommitDate: 2021-01-17
 
-    Merge branch 'update-http-parser'
+    workflow: Build with UBSAN enabled
 
-commit ab2aa5672b8edde45bd4af0da514fa2f12ba5af0
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-17
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-17
-
-    Fix test failure
-    
-    Now http_parser_parse_url returns nonzero if empty URI is given.
-
-commit ff87a542025471d2ba7b92199758250d03293e59
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-17
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-17
-
-    Use http-parser 0d0a24e19eb5ba232d2ea8859aba2a7cc6c42bc4
-
-commit 439dbce6793814f75203614f6a7bdeaca6e49825
-Merge: 803d4ba9 e9c9838c
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-14
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-14
-
-    Merge branch 'nghttpx-h1-connection-pool-per-addr'
-
-commit e9c9838cdc86d4e141435a2a8620c0d955cdf818
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-11
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-14
-
-    nghttpx: Pool h1 backend connection per address
-    
-    Pool HTTP/1.1 backend connection per address and reuse it only when
-    the next round robin index refers to this address.  Previously if
-    there is a pooled connection, there is no round robin selection.
-
-commit 803d4ba948430c8b3e9af0ac0d742b0a2b681c2f
-Merge: 732245e5 fdcdb21c
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-14
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-14
-
-    Merge branch 'nghttpx-randomize-roundrobin-order'
-
-commit 732245e562bdc868b0d44de2fb3429ed61c3ba05
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-12
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-12
-
-    make clang-format
-
-commit 9e8d5433e7aebf7084161e673a110d3553530537
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-12
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-12
-
-    Use clang-format-7
-
-commit fdcdb21c38ef7acf23853d47d1dc5bda69d5398f
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-11
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-11
-
-    nghttpx: Randomize backend address round robin order per thread
-
-commit 11d0533cfcb3d3230fbad8db56efb0387e46a621
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2019-01-05
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2019-01-05
-
-    nghttpx: Ensure that cert serial does not exceed 20 bytes
-
-commit dbb5f00d685894275d7e7e4ccd0fff0793d0d776
-Merge: 9cc412e2 5b2efc0a
+commit 7ebab98e91df1678da74b47d690a1b1c5f2ba2e2
+Merge: 43ba3125 23fc6cc9
 Author:     Tatsuhiro Tsujikawa <404610+tatsuhiro-t@users.noreply.github.com>
-AuthorDate: 2019-01-05
+AuthorDate: 2020-12-29
 Commit:     GitHub <noreply@github.com>
-CommitDate: 2019-01-05
+CommitDate: 2020-12-29
 
-    Merge pull request #1287 from rckclmbr/fix_serial_size
+    Merge pull request #1548 from nghttp2/py3-bindings
     
-    Fix getting long serial numbers for openssl < 1.1
+    Py3 bindings
 
-commit 9cc412e2fd4fbda089d0da7a678c2682449b87dd
-Merge: 082e162f 7e4c48a4
+commit 23fc6cc9002e34f9b771ee54286e559fa4eecaef
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-29
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-29
+
+    Bump Linux runner OS to ubuntu 20.04
+
+commit 2e35cdea6ca3cdad3c111d1ca927d70dc29f9771
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-29
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-29
+
+    Update doc
+
+commit 22af8e782bed98e4b4f71617c9b905dd37e7c3f3
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-29
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-29
+
+    Require python3 for python bindings
+
+commit c88e9100096330c5d4445bc8d7482d6ad2c75fce
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-29
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-29
+
+    Update ax_python_devel.m4
+
+commit 43ba3125932c1d56addaeded2b7f62637af255cd
+Merge: 79a4f789 3c17299a
 Author:     Tatsuhiro Tsujikawa <404610+tatsuhiro-t@users.noreply.github.com>
-AuthorDate: 2019-01-05
+AuthorDate: 2020-12-29
 Commit:     GitHub <noreply@github.com>
-CommitDate: 2019-01-05
+CommitDate: 2020-12-29
 
-    Merge pull request #1285 from staticinvocation/master
+    Merge pull request #1547 from nghttp2/sphinx-v3.3
     
-    Add a CMake option to disable shared library
+    Sphinx v3.3
 
-commit 5b2efc0a128102b165a8a62581a1ab3ec4ca675d
-Author:     Josh Braegger <jbraeg@fb.com>
-AuthorDate: 2019-01-03
-Commit:     Josh Braegger <jbraeg@fb.com>
-CommitDate: 2019-01-03
+commit 3c17299a925dc150fd7aa7e1534d4b1679fb397d
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-29
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-29
 
-    Fix getting long serial numbers for openssl < 1.1
-    
-    From https://www.ietf.org/rfc/rfc5280.txt
-    
-    > As noted in Section 4.1.2.2, serial numbers can be expected to
-    > contain long integers.  Certificate users MUST be able to handle
-    > serialNumber values up to 20 octets in length.  Conforming CAs MUST
-    > NOT use serialNumber values longer than 20 octets.
-    
-    Without this, nghttpx will fatal.
-    
-        jbraeg$ openssl x509 -in ~/test_certs/client.crt -serial -noout
-        serial=E0CFDFC7CEA10DF8AAF715C37FAEB410
-    
-        jbraeg$ curl -k --key ~/test_certs/client.key --cert ~/test_certs/client.crt https://192.168.98.100:3000/; echo
-        curl: (56) Unexpected EOF
-    
-        ...
-        Assertion failed: n == b.size() (shrpx_tls.cc: get_x509_serial: 2051)
-        2019-01-03T20:25:21.289Z 1 1 f84316ae NOTICE (shrpx_log.cc:895) Worker process: [9] exited abnormally with status 0x06; exit status 0; signal Aborted(6)
-        2019-01-03T20:25:21.290Z 1 1 f84316ae NOTICE (shrpx.cc:4311) Shutdown momentarily
+    Update enum references
 
-commit 7e4c48a461482275b4964ee7e0becdc6c55abf3c
-Author:     Brendan Heinonen <brendan@heinonen.co>
-AuthorDate: 2018-12-27
-Commit:     Brendan Heinonen <brendan@heinonen.co>
-CommitDate: 2018-12-27
+commit a7ecff657cfbcc442bfc70d51efbad1b57a9be46
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-29
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-29
 
-    Disable shared library if ENABLE_SHARED_LIB is OFF
-    
-    Signed-off-by: Brendan Heinonen <brendan@heinonen.co>
+    Make doc generation work with sphinx v3.3
 
-commit 082e162f3ca69282c2566fe52d8b943a11b2f38f
-Merge: c78abbe1 7cc7c06c
+commit 79a4f789a1453d8b916fbcfa43804184462bd11f
+Merge: 46536729 28ba0b37
 Author:     Tatsuhiro Tsujikawa <404610+tatsuhiro-t@users.noreply.github.com>
-AuthorDate: 2018-12-26
+AuthorDate: 2020-12-29
 Commit:     GitHub <noreply@github.com>
-CommitDate: 2018-12-26
+CommitDate: 2020-12-29
 
-    Merge pull request #1282 from alagoutte/travis
+    Merge pull request #1546 from nghttp2/py3-scripts
     
-    Travis: Update to Xenial
+    Python3 development scripts
 
-commit 7cc7c06c7bab6d158e813be15efe9c722af2abb5
-Author:     Alexis La Goutte <alexis.lagoutte@gmail.com>
-AuthorDate: 2018-12-25
-Commit:     Alexis La Goutte <alexis.lagoutte@gmail.com>
-CommitDate: 2018-12-26
+commit 28ba0b37e17e4daa901b622b0865dae61ee709a3
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-29
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-29
 
-    .travis(.yml): no longer need llvm-toolchain-trusty-7
+    Update document reference
+
+commit 6b7ade9f3fb9ebb68bcb0c0911b2a831d4f10333
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-29
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-29
+
+    Require python3 for python scripts
+
+commit 465367294fbcd2029b09844c4859b5acaa3fbe87
+Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+AuthorDate: 2020-12-28
+Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
+CommitDate: 2020-12-28
+
+    Bump clang-format to 10
+
+commit 563c1173038a418165eebc27e61e4845eee3ca81
+Merge: 1c04ca80 d32e20bc
+Author:     Tatsuhiro Tsujikawa <404610+tatsuhiro-t@users.noreply.github.com>
+AuthorDate: 2020-12-16
+Commit:     GitHub <noreply@github.com>
+CommitDate: 2020-12-16
+
+    Merge pull request #1544 from nghttp2/nghttpx-clear-mcpool
     
-    clang-7 is enable by default
+    nghttpx: Make sure that Pool gets cleared when all buffers are returned
 
-commit 12ebeb30d0fa36b8ede57b24c68484dc5049c4a4
-Author:     Alexis La Goutte <alexis.lagoutte@gmail.com>
-AuthorDate: 2018-12-25
-Commit:     Alexis La Goutte <alexis.lagoutte@gmail.com>
-CommitDate: 2018-12-25
+commit 1c04ca80328434e8972726c9b26f524b4ee25a90
+Merge: 8b8ba6b0 d8c71d5f
+Author:     Tatsuhiro Tsujikawa <404610+tatsuhiro-t@users.noreply.github.com>
+AuthorDate: 2020-12-16
+Commit:     GitHub <noreply@github.com>
+CommitDate: 2020-12-16
 
-    .travis(.yml): Update to Xenial
+    Merge pull request #1540 from tavrez/patch-1
     
-    Xenial is now available with Travis CI
-    https://blog.travis-ci.com/2018-11-08-xenial-release
+    Added new nghttp2_ksl.c to Windows makefile
 
-commit c78abbe1d268cf396b86ec79349f25e8d442ae07
+commit d32e20bcaa8c9f4f24b9d5c3885204b6414fc923
 Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-12-26
+AuthorDate: 2020-12-16
 Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-12-26
+CommitDate: 2020-12-16
 
-    Update mruby to 2.0.0
+    nghttpx: Make sure that Pool gets cleared when all buffers are returned
 
-commit 124c7848c0cff3c3daab2b259424847e72d2252f
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-12-11
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-12-11
+commit 8b8ba6b0a61b58b2e40cb0325dbf49aca6fe62e2
+Merge: fb5b5aef 81fb0153
+Author:     Tatsuhiro Tsujikawa <404610+tatsuhiro-t@users.noreply.github.com>
+AuthorDate: 2020-12-14
+Commit:     GitHub <noreply@github.com>
+CommitDate: 2020-12-14
 
-    nghttpx: Add missing return
-
-commit ce9667c4f5c0acc8ff94f8d98e18d4ed7c7d2f60
-Merge: 302abf1b f3f40840
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-12-09
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-12-09
-
-    Merge branch 'nghttpx-fix-trailing-slash-handling'
-
-commit f3f40840b3e0c50920edeab534046aabc6d0be9e
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-12-09
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-12-09
-
-    nghttpx: Fix broken trailing slash handling
+    Merge pull request #1542 from nghttp2/nghttpx-check-sigalg
     
-    nghttpx allows a pattern with trailing slash to match a request path
-    without it.  Previously, under certain pattern registration, this does
-    not work.
+    nghttpx: Choose ECDSA cert if compatible signature algorithm available
 
-commit 302abf1b46ec24b7db52f2f5ccc52c29dcc48556
+commit 81fb015391c7ba9218b87caa148f46c888a49368
 Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-11-23
+AuthorDate: 2020-12-13
 Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-11-23
+CommitDate: 2020-12-13
 
-    h2load: Fix compile error with gcc
+    nghttpx: Choose ECDSA cert if compatible signature algorithm available
 
-commit 089a03be4209ea26984baa9ce0236ebd42936e56
+commit d8c71d5fdb6cd1579f2a569ccd7bdbdf9f776ea1
+Author:     Reza Tavakoli <9096461+tavrez@users.noreply.github.com>
+AuthorDate: 2020-12-02
+Commit:     GitHub <noreply@github.com>
+CommitDate: 2020-12-02
+
+    Added new nghttp2_ksl.c to Windows makefile
+
+commit fb5b5aef0aca21142d867b45f8b425a1da32bc4d
+Merge: ffcdf5df 6787423e
+Author:     Tatsuhiro Tsujikawa <404610+tatsuhiro-t@users.noreply.github.com>
+AuthorDate: 2020-11-27
+Commit:     GitHub <noreply@github.com>
+CommitDate: 2020-11-27
+
+    Merge pull request #1537 from nghttp2/nghttpx-allow-colon-in-pattern
+    
+    nghttpx: Add workaround to include ':' in backend pattern
+
+commit 6787423edc7928ea778260e9c0c54b72f0a39770
 Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-11-23
+AuthorDate: 2020-11-27
 Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-11-23
+CommitDate: 2020-11-27
 
-    h2load: Write log file with write(2)
+    nghttpx: Add workaround to include ':' in backend pattern
 
-commit de4fe72861d39396c1b5658c37ec200cdea2eb4a
-Merge: eb679253 d1b3a83f
+commit ffcdf5dfbcfa9fa35a5501e0ea679bdf6181a88c
+Merge: c9d5472f 0cdb1738
+Author:     Tatsuhiro Tsujikawa <404610+tatsuhiro-t@users.noreply.github.com>
+AuthorDate: 2020-11-24
+Commit:     GitHub <noreply@github.com>
+CommitDate: 2020-11-24
+
+    Merge pull request #1533 from LorenzNickel/patch-1
+    
+    Fix typo in security.rst
+
+commit 0cdb173846f84ffff8035b83c1d9ddd4fe732fda
+Author:     Lorenz Nickel <lorenz.nickel@gmx.net>
+AuthorDate: 2020-11-23
+Commit:     GitHub <noreply@github.com>
+CommitDate: 2020-11-23
+
+    Fix typo in security.rst
+
+commit c9d5472ffb5e7ec1214dd08d0afb4781c83725b2
 Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-11-23
+AuthorDate: 2020-11-23
 Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-11-23
+CommitDate: 2020-11-23
 
-    Merge branch 'pyos-master'
-
-commit d1b3a83f5982f4da69c31302450fd13e8e2a13cb
-Author:     dawg <pyos100500@gmail.com>
-AuthorDate: 2018-11-11
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-11-23
-
-    h2load: add an option to write per-request logs
-
-commit eb6792533d0750edcfd431cafaa6740e026b37df
-Merge: c98362ea 6800d317
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-11-23
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-11-23
-
-    Merge branch 'puscas-port_in_use'
-
-commit 6800d317e7838bdfb17b2f9bfca20d3ed4331ee8
-Author:     Pedro Santos <pedro.vortix@gmail.com>
-AuthorDate: 2018-11-11
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-11-23
-
-    added access to the number of the current server port
-
-commit c98362eab1e6d8de772b67448cde3bbbee058ed8
-Author:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-AuthorDate: 2018-11-23
-Commit:     Tatsuhiro Tsujikawa <tatsuhiro.t@gmail.com>
-CommitDate: 2018-11-23
-
-    Bump up version number to 1.36.0-DEV
+    Bump version number to 1.43.0-DEV

@@ -47,10 +47,11 @@
 #include <cerrno>
 #include <limits>
 #include <fstream>
+#include <unordered_map>
 
 #include <nghttp2/nghttp2.h>
 
-#include "http-parser/http_parser.h"
+#include "url-parser/url_parser.h"
 
 #include "shrpx_log.h"
 #include "shrpx_tls.h"
@@ -386,6 +387,11 @@ LogFragmentType log_var_lookup_token(const char *name, size_t namelen) {
     break;
   case 4:
     switch (name[3]) {
+    case 'h':
+      if (util::strieq_l("pat", name, 3)) {
+        return LogFragmentType::PATH;
+      }
+      break;
     case 'n':
       if (util::strieq_l("alp", name, 3)) {
         return LogFragmentType::ALPN;
@@ -395,6 +401,11 @@ LogFragmentType log_var_lookup_token(const char *name, size_t namelen) {
     break;
   case 6:
     switch (name[5]) {
+    case 'd':
+      if (util::strieq_l("metho", name, 5)) {
+        return LogFragmentType::METHOD;
+      }
+      break;
     case 's':
       if (util::strieq_l("statu", name, 5)) {
         return LogFragmentType::STATUS;
@@ -501,6 +512,15 @@ LogFragmentType log_var_lookup_token(const char *name, size_t namelen) {
       break;
     }
     break;
+  case 16:
+    switch (name[15]) {
+    case 'n':
+      if (util::strieq_l("protocol_versio", name, 15)) {
+        return LogFragmentType::PROTOCOL_VERSION;
+      }
+      break;
+    }
+    break;
   case 17:
     switch (name[16]) {
     case 'l':
@@ -518,6 +538,11 @@ LogFragmentType log_var_lookup_token(const char *name, size_t namelen) {
       }
       if (util::strieq_l("tls_session_reuse", name, 17)) {
         return LogFragmentType::TLS_SESSION_REUSED;
+      }
+      break;
+    case 'y':
+      if (util::strieq_l("path_without_quer", name, 17)) {
+        return LogFragmentType::PATH_WITHOUT_QUERY;
       }
       break;
     }
@@ -813,11 +838,14 @@ int parse_upstream_params(UpstreamParams &out, const StringRef &src_params) {
 struct DownstreamParams {
   StringRef sni;
   StringRef mruby;
+  StringRef group;
   AffinityConfig affinity;
   ev_tstamp read_timeout;
   ev_tstamp write_timeout;
   size_t fall;
   size_t rise;
+  uint32_t weight;
+  uint32_t group_weight;
   Proto proto;
   bool tls;
   bool dns;
@@ -960,6 +988,43 @@ int parse_downstream_params(DownstreamParams &out,
               StringRef{first + str_size("write-timeout="), end}) == -1) {
         return -1;
       }
+    } else if (util::istarts_with_l(param, "weight=")) {
+      auto valstr = StringRef{first + str_size("weight="), end};
+      if (valstr.empty()) {
+        LOG(ERROR)
+            << "backend: weight: non-negative integer [1, 256] is expected";
+        return -1;
+      }
+
+      auto n = util::parse_uint(valstr);
+      if (n < 1 || n > 256) {
+        LOG(ERROR)
+            << "backend: weight: non-negative integer [1, 256] is expected";
+        return -1;
+      }
+      out.weight = n;
+    } else if (util::istarts_with_l(param, "group=")) {
+      auto valstr = StringRef{first + str_size("group="), end};
+      if (valstr.empty()) {
+        LOG(ERROR) << "backend: group: empty string is not allowed";
+        return -1;
+      }
+      out.group = valstr;
+    } else if (util::istarts_with_l(param, "group-weight=")) {
+      auto valstr = StringRef{first + str_size("group-weight="), end};
+      if (valstr.empty()) {
+        LOG(ERROR) << "backend: group-weight: non-negative integer [1, 256] is "
+                      "expected";
+        return -1;
+      }
+
+      auto n = util::parse_uint(valstr);
+      if (n < 1 || n > 256) {
+        LOG(ERROR) << "backend: group-weight: non-negative integer [1, 256] is "
+                      "expected";
+        return -1;
+      }
+      out.group_weight = n;
     } else if (!param.empty()) {
       LOG(ERROR) << "backend: " << param << ": unknown keyword";
       return -1;
@@ -996,6 +1061,7 @@ int parse_mapping(Config *config, DownstreamAddrConfig &addr,
 
   DownstreamParams params{};
   params.proto = Proto::HTTP1;
+  params.weight = 1;
 
   if (parse_downstream_params(params, src_params) != 0) {
     return -1;
@@ -1015,6 +1081,9 @@ int parse_mapping(Config *config, DownstreamAddrConfig &addr,
 
   addr.fall = params.fall;
   addr.rise = params.rise;
+  addr.weight = params.weight;
+  addr.group = make_string_ref(downstreamconf.balloc, params.group);
+  addr.group_weight = params.group_weight;
   addr.proto = params.proto;
   addr.tls = params.tls;
   addr.sni = make_string_ref(downstreamconf.balloc, params.sni);
@@ -1040,9 +1109,9 @@ int parse_mapping(Config *config, DownstreamAddrConfig &addr,
       *p = '\0';
       pattern = StringRef{iov.base, p};
     } else {
-      auto path = http2::normalize_path(downstreamconf.balloc,
-                                        StringRef{slash, std::end(raw_pattern)},
-                                        StringRef{});
+      auto path = http2::normalize_path_colon(
+          downstreamconf.balloc, StringRef{slash, std::end(raw_pattern)},
+          StringRef{});
       auto iov = make_byte_ref(downstreamconf.balloc,
                                std::distance(std::begin(raw_pattern), slash) +
                                    path.size() + 1);
@@ -2637,13 +2706,16 @@ int parse_config(Config *config, int optid, const StringRef &opt,
 
     return 0;
   }
-  case SHRPX_OPTID_LOG_LEVEL:
-    if (Log::set_severity_level_by_name(optarg) == -1) {
+  case SHRPX_OPTID_LOG_LEVEL: {
+    auto level = Log::get_severity_level_by_name(optarg);
+    if (level == -1) {
       LOG(ERROR) << opt << ": Invalid severity level: " << optarg;
       return -1;
     }
+    config->logging.severity = level;
 
     return 0;
+  }
   case SHRPX_OPTID_DAEMON:
     config->daemon = util::strieq_l("yes", optarg);
 
@@ -3946,6 +4018,8 @@ int configure_downstream_group(Config *config, bool http2_proxy,
     addr.host = StringRef::from_lit(DEFAULT_DOWNSTREAM_HOST);
     addr.port = DEFAULT_DOWNSTREAM_PORT;
     addr.proto = Proto::HTTP1;
+    addr.weight = 1;
+    addr.group_weight = 1;
 
     DownstreamAddrGroupConfig g(StringRef::from_lit("/"));
     g.addrs.push_back(std::move(addr));
@@ -4025,7 +4099,17 @@ int configure_downstream_group(Config *config, bool http2_proxy,
   auto resolve_flags = numeric_addr_only ? AI_NUMERICHOST | AI_NUMERICSERV : 0;
 
   for (auto &g : addr_groups) {
+    std::unordered_map<StringRef, uint32_t> wgchk;
     for (auto &addr : g.addrs) {
+      if (addr.group_weight) {
+        auto it = wgchk.find(addr.group);
+        if (it == std::end(wgchk)) {
+          wgchk.emplace(addr.group, addr.group_weight);
+        } else if ((*it).second != addr.group_weight) {
+          LOG(FATAL) << "backend: inconsistent group-weight for a single group";
+          return -1;
+        }
+      }
 
       if (addr.host_unix) {
         // for AF_UNIX socket, we use "localhost" as host for backend
@@ -4075,6 +4159,17 @@ int configure_downstream_group(Config *config, bool http2_proxy,
       } else {
         LOG(INFO) << "Resolving backend address " << hostport
                   << " takes place dynamically";
+      }
+    }
+
+    for (auto &addr : g.addrs) {
+      if (addr.group_weight == 0) {
+        auto it = wgchk.find(addr.group);
+        if (it == std::end(wgchk)) {
+          addr.group_weight = 1;
+        } else {
+          addr.group_weight = (*it).second;
+        }
       }
     }
 

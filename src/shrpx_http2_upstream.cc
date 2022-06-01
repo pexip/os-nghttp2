@@ -321,6 +321,10 @@ int Http2Upstream::on_request_headers(Downstream *downstream,
   if (LOG_ENABLED(INFO)) {
     std::stringstream ss;
     for (auto &nv : nva) {
+      if (nv.name == "authorization") {
+        ss << TTY_HTTP_HD << nv.name << TTY_RST << ": <redacted>\n";
+        continue;
+      }
       ss << TTY_HTTP_HD << nv.name << TTY_RST << ": " << nv.value << "\n";
     }
     ULOG(INFO, this) << "HTTP request headers. stream_id="
@@ -456,44 +460,39 @@ void Http2Upstream::start_downstream(Downstream *downstream) {
 void Http2Upstream::initiate_downstream(Downstream *downstream) {
   int rv;
 
-  auto dconn = handler_->get_downstream_connection(rv, downstream);
-  if (!dconn) {
-    if (rv == SHRPX_ERR_TLS_REQUIRED) {
-      rv = redirect_to_https(downstream);
-    } else {
-      rv = error_reply(downstream, 502);
-    }
-    if (rv != 0) {
-      rst_stream(downstream, NGHTTP2_INTERNAL_ERROR);
-    }
+  DownstreamConnection *dconn_ptr;
 
-    downstream->set_request_state(DownstreamState::CONNECT_FAIL);
-    downstream_queue_.mark_failure(downstream);
+  for (;;) {
+    auto dconn = handler_->get_downstream_connection(rv, downstream);
+    if (!dconn) {
+      if (rv == SHRPX_ERR_TLS_REQUIRED) {
+        rv = redirect_to_https(downstream);
+      } else {
+        rv = error_reply(downstream, 502);
+      }
+      if (rv != 0) {
+        rst_stream(downstream, NGHTTP2_INTERNAL_ERROR);
+      }
 
-    return;
-  }
+      downstream->set_request_state(DownstreamState::CONNECT_FAIL);
+      downstream_queue_.mark_failure(downstream);
+
+      return;
+    }
 
 #ifdef HAVE_MRUBY
-  auto dconn_ptr = dconn.get();
+    dconn_ptr = dconn.get();
 #endif // HAVE_MRUBY
-  rv = downstream->attach_downstream_connection(std::move(dconn));
-  if (rv != 0) {
-    // downstream connection fails, send error page
-    if (error_reply(downstream, 502) != 0) {
-      rst_stream(downstream, NGHTTP2_INTERNAL_ERROR);
+    rv = downstream->attach_downstream_connection(std::move(dconn));
+    if (rv == 0) {
+      break;
     }
-
-    downstream->set_request_state(DownstreamState::CONNECT_FAIL);
-
-    downstream_queue_.mark_failure(downstream);
-
-    return;
   }
 
 #ifdef HAVE_MRUBY
   const auto &group = dconn_ptr->get_downstream_addr_group();
   if (group) {
-    const auto &mruby_ctx = group->mruby_ctx;
+    const auto &mruby_ctx = group->shared_addr->mruby_ctx;
     if (mruby_ctx->run_on_request_proc(downstream) != 0) {
       if (error_reply(downstream, 500) != 0) {
         rst_stream(downstream, NGHTTP2_INTERNAL_ERROR);
@@ -1263,7 +1262,10 @@ int Http2Upstream::downstream_read(DownstreamConnection *dconn) {
   } else {
     auto rv = downstream->on_read();
     if (rv == SHRPX_ERR_EOF) {
-      return downstream_eof(dconn);
+      if (downstream->get_request_header_sent()) {
+        return downstream_eof(dconn);
+      }
+      return SHRPX_ERR_RETRY;
     }
     if (rv == SHRPX_ERR_DCONN_CANCELED) {
       downstream->pop_downstream_connection();
@@ -1379,7 +1381,11 @@ int Http2Upstream::downstream_error(DownstreamConnection *dconn, int events) {
     } else {
       unsigned int status;
       if (events & Downstream::EVENT_TIMEOUT) {
-        status = 504;
+        if (downstream->get_request_header_sent()) {
+          status = 504;
+        } else {
+          status = 408;
+        }
       } else {
         status = 502;
       }
@@ -1659,7 +1665,7 @@ int Http2Upstream::on_downstream_header_complete(Downstream *downstream) {
     auto dconn = downstream->get_downstream_connection();
     const auto &group = dconn->get_downstream_addr_group();
     if (group) {
-      const auto &dmruby_ctx = group->mruby_ctx;
+      const auto &dmruby_ctx = group->shared_addr->mruby_ctx;
 
       if (dmruby_ctx->run_on_response_proc(downstream) != 0) {
         if (error_reply(downstream, 500) != 0) {
@@ -2076,14 +2082,16 @@ int Http2Upstream::on_downstream_reset(Downstream *downstream, bool no_retry) {
   // downstream connection is clean; we can retry with new
   // downstream connection.
 
-  dconn = handler_->get_downstream_connection(rv, downstream);
-  if (!dconn) {
-    goto fail;
-  }
+  for (;;) {
+    auto dconn = handler_->get_downstream_connection(rv, downstream);
+    if (!dconn) {
+      goto fail;
+    }
 
-  rv = downstream->attach_downstream_connection(std::move(dconn));
-  if (rv != 0) {
-    goto fail;
+    rv = downstream->attach_downstream_connection(std::move(dconn));
+    if (rv == 0) {
+      break;
+    }
   }
 
   rv = downstream->push_request_headers();

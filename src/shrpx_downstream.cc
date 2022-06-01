@@ -26,7 +26,7 @@
 
 #include <cassert>
 
-#include "http-parser/http_parser.h"
+#include "url-parser/url_parser.h"
 
 #include "shrpx_upstream.h"
 #include "shrpx_client_handler.h"
@@ -144,7 +144,8 @@ Downstream::Downstream(Upstream *upstream, MemchunkPool *mcpool,
       request_header_sent_(false),
       accesslog_written_(false),
       new_affinity_cookie_(false),
-      blocked_request_data_eof_(false) {
+      blocked_request_data_eof_(false),
+      expect_100_continue_(false) {
 
   auto &timeoutconf = get_config()->http2.timeout;
 
@@ -192,7 +193,7 @@ Downstream::~Downstream() {
   if (dconn_) {
     const auto &group = dconn_->get_downstream_addr_group();
     if (group) {
-      const auto &mruby_ctx = group->mruby_ctx;
+      const auto &mruby_ctx = group->shared_addr->mruby_ctx;
       mruby_ctx->delete_downstream(this);
     }
   }
@@ -230,7 +231,7 @@ void Downstream::detach_downstream_connection() {
 #ifdef HAVE_MRUBY
   const auto &group = dconn_->get_downstream_addr_group();
   if (group) {
-    const auto &mruby_ctx = group->mruby_ctx;
+    const auto &mruby_ctx = group->shared_addr->mruby_ctx;
     mruby_ctx->delete_downstream(this);
   }
 #endif // HAVE_MRUBY
@@ -255,7 +256,7 @@ std::unique_ptr<DownstreamConnection> Downstream::pop_downstream_connection() {
 
   const auto &group = dconn_->get_downstream_addr_group();
   if (group) {
-    const auto &mruby_ctx = group->mruby_ctx;
+    const auto &mruby_ctx = group->shared_addr->mruby_ctx;
     mruby_ctx->delete_downstream(this);
   }
 #endif // HAVE_MRUBY
@@ -573,6 +574,18 @@ void FieldStore::append_last_trailer_value(const char *data, size_t len) {
                                   trailers_, data, len);
 }
 
+void FieldStore::erase_content_length_and_transfer_encoding() {
+  for (auto &kv : headers_) {
+    switch (kv.token) {
+    case http2::HD_CONTENT_LENGTH:
+    case http2::HD_TRANSFER_ENCODING:
+      kv.name = StringRef{};
+      kv.token = -1;
+      break;
+    }
+  }
+}
+
 void Downstream::set_request_start_time(
     std::chrono::high_resolution_clock::time_point time) {
   request_start_time_ = std::move(time);
@@ -640,7 +653,7 @@ int Downstream::push_request_headers() {
 int Downstream::push_upload_data_chunk(const uint8_t *data, size_t datalen) {
   req_.recv_body_length += datalen;
 
-  if (!request_header_sent_) {
+  if (!dconn_ && !request_header_sent_) {
     blocked_request_buf_.append(data, datalen);
     req_.unconsumed_body_length += datalen;
     return 0;
@@ -662,7 +675,7 @@ int Downstream::push_upload_data_chunk(const uint8_t *data, size_t datalen) {
 }
 
 int Downstream::end_upload_data() {
-  if (!request_header_sent_) {
+  if (!dconn_ && !request_header_sent_) {
     blocked_request_data_eof_ = true;
     return 0;
   }
@@ -845,6 +858,11 @@ void Downstream::inspect_http1_request() {
       chunked_request_ = true;
     }
   }
+
+  auto expect = req_.fs.header(http2::HD_EXPECT);
+  expect_100_continue_ =
+      expect &&
+      util::strieq(expect->value, StringRef::from_lit("100-continue"));
 }
 
 void Downstream::inspect_http1_response() {
@@ -1141,6 +1159,14 @@ bool Downstream::get_blocked_request_data_eof() const {
   return blocked_request_data_eof_;
 }
 
+void Downstream::set_blocked_request_data_eof(bool f) {
+  blocked_request_data_eof_ = f;
+}
+
 void Downstream::set_ws_key(const StringRef &key) { ws_key_ = key; }
+
+bool Downstream::get_expect_100_continue() const {
+  return expect_100_continue_;
+}
 
 } // namespace shrpx

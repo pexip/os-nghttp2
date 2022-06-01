@@ -8,8 +8,9 @@ end
 assert('Hash#==', '15.2.13.4.1') do
   assert_true({ 'abc' => 'abc' } == { 'abc' => 'abc' })
   assert_false({ 'abc' => 'abc' } ==  { 'cba' => 'cba' })
-  assert_true({ :equal => 1 } == { :equal => 1.0 }) if class_defined?("Float")
   assert_false({ :a => 1 } == true)
+  skip unless Object.const_defined?(:Float)
+  assert_true({ :equal => 1 } == { :equal => 1.0 })
 end
 
 assert('Hash#[]', '15.2.13.4.2') do
@@ -351,11 +352,13 @@ end
 
 assert('Hash#inspect') do
   h = { "c" => 300, "a" => 100, "d" => 400, "c" => 300  }
+  h["recur"] = h
   ret = h.to_s
 
   assert_include ret, '"c"=>300'
   assert_include ret, '"a"=>100'
   assert_include ret, '"d"=>400'
+  assert_include ret, '"recur"=>{...}'
 end
 
 assert('Hash#rehash') do
@@ -369,7 +372,7 @@ end
 
 assert('Hash#freeze') do
   h = {}.freeze
-  assert_raise(RuntimeError) do
+  assert_raise(FrozenError) do
     h[:a] = 'b'
   end
 end
