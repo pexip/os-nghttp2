@@ -1,3 +1,9 @@
+nghttp2 (1.43.0-1pexip1) pexip; urgency=medium
+
+  * Initial bullseye build
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Thu, 02 Jun 2022 14:42:37 +0100
+
 nghttp2 (1.43.0-1) unstable; urgency=medium
 
   * New upstream release 1.43.0
