@@ -5,11 +5,9 @@ Section: httpd
 Priority: optional
 Build-Depends: debhelper (>= 13),
                debhelper-compat (= 13),
-               dpkg-dev (>= 1.17.14),
                libc-ares-dev,
                libcunit1-dev <!nocheck>,
                libev-dev,
-               libevent-dev,
                libjansson-dev,
                libjemalloc-dev [!hurd-i386],
                libssl-dev,
@@ -18,7 +16,7 @@ Build-Depends: debhelper (>= 13),
                pkg-config,
                zlib1g-dev
 Build-Depends-Indep: python3-sphinx
-Standards-Version: 4.5.1
+Standards-Version: 4.6.1
 Vcs-Browser: https://salsa.debian.org/debian/nghttp2
 Vcs-Git: https://salsa.debian.org/debian/nghttp2.git
 Homepage: https://nghttp2.org/
@@ -26,6 +24,7 @@ Rules-Requires-Root: no
 
 Package: libnghttp2-dev
 Architecture: any
+Multi-Arch: same
 Section: libdevel
 Depends: libnghttp2-14 (= ${binary:Version}), pkg-config, ${misc:Depends}
 Suggests: libnghttp2-doc
@@ -109,6 +108,7 @@ Description: server implementing HTTP/2 protocol
 
 Package: nghttp2
 Architecture: all
+Multi-Arch: foreign
 Depends: nghttp2-client (>= ${binary:Version}),
          nghttp2-proxy (>= ${binary:Version}),
          nghttp2-server (>= ${binary:Version}),
