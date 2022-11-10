@@ -7,18 +7,6 @@ Files: *
 Copyright: 2012, 2013, 2014 Tatsuhiro Tsujikawa
 License: Expat
 
-Files: third-party/http-parser/http_parser.h
-Copyright: Joyent, Inc. and other Node contributors. All rights reserved.
-License: Expat
-
-Files: third-party/http-parser/http_parser.c
-Copyright: 2002-2013 Igor Sysoev
-           2011-2013 Nginx, Inc.
-License: MIT
-Comment: Based on src/http/ngx_http_parse.c from NGINX copyright Igor Sysoev.
- Additional changes are licensed under the same terms as NGINX and
- copyright Joyent, Inc. and other Node contributors. All rights reserved.
-
 Files: third-party/mruby/*
 Copyright: 2015 mruby developers
 License: MIT
@@ -28,7 +16,7 @@ Files: tests/nghttp2_npn_test.*
 Copyright: 2012, Twist Inc.
 License: Expat
 
-Files: m4/ax_cxx_compile_stdcxx_11.m4
+Files: m4/ax_cxx_compile_stdcxx.m4
 Copyright: 2008, Benjamin Kosnik <bkoz@redhat.com>,
            2012, Zack Weinberg <zackw@panix.com>,
            2013, Roy Stogner <roystgnr@ices.utexas.edu>
@@ -48,15 +36,10 @@ Files: doc/_themes/sphinx_rtd_theme/*
 Copyright: 2013 Dave Snider
 License: MIT
 
-Files: doc/_themes/sphinx_rtd_theme/layout_old.html doc/_themes/sphinx_rtd_theme/search.html
+Files: doc/_themes/sphinx_rtd_theme/search.html
 Copyright: 2007-2013 by the Sphinx team
 License: BSD-2-clause
 Comment: License details from https://bitbucket.org/birkenfeld/sphinx/src file LICENSE
-
-Files: doc/_themes/sphinx_rtd_theme/static/fonts/FontAwesome.otf
-Copyright: Dave Gandy
-License: SIL-OFL-1.1
-Comment: Font Awesome by Dave Gandy - http://fontawesome.io
 
 
 License: Expat

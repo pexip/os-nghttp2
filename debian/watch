@@ -1,2 +1,3 @@
 version=4
-  https://github.com/tatsuhiro-t/nghttp2/releases .*/nghttp2-(\d\S*)\.tar\.bz2
+opts=filenamemangle=s/.+\/v?(\d\S+)\.tar\.gz/nghttp2-$1\.tar\.gz/ \
+  https://github.com/nghttp2/nghttp2/tags .*/v?(\d\S+)\.tar\.gz
