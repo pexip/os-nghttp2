@@ -55,6 +55,9 @@
 #  include <openssl/core_names.h>
 #  include <openssl/decoder.h>
 #endif // OPENSSL_3_0_0_API
+#ifdef OPENSSL_IS_BORINGSSL
+#  include <openssl/hmac.h>
+#endif // OPENSSL_IS_BORINGSSL
 
 #include <nghttp2/nghttp2.h>
 
@@ -1082,6 +1085,7 @@ SSL_CTX *create_ssl_context(const char *private_key_file, const char *cert_file,
                                   SSL_FILETYPE_PEM) != 1) {
     LOG(FATAL) << "SSL_CTX_use_PrivateKey_file failed: "
                << ERR_error_string(ERR_get_error(), nullptr);
+    DIE();
   }
 #else  // HAVE_NEVERBLEED
   std::array<char, NEVERBLEED_ERRBUF_SIZE> errbuf;
@@ -1377,6 +1381,7 @@ SSL_CTX *create_quic_ssl_context(const char *private_key_file,
                                   SSL_FILETYPE_PEM) != 1) {
     LOG(FATAL) << "SSL_CTX_use_PrivateKey_file failed: "
                << ERR_error_string(ERR_get_error(), nullptr);
+    DIE();
   }
 #  else  // HAVE_NEVERBLEED
   std::array<char, NEVERBLEED_ERRBUF_SIZE> errbuf;
