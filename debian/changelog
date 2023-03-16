@@ -1,3 +1,9 @@
+nghttp2 (1.52.0-1pexip1) pexip; urgency=medium
+
+  * New upstream release
+
+ -- Huw Jones <huw@pexip.com>  Thu, 16 Mar 2023 13:35:21 +0000
+
 nghttp2 (1.52.0-1) unstable; urgency=medium
 
   * New upstream release 1.52.0
