@@ -1,3 +1,22 @@
+nghttp2 (1.52.0-1) unstable; urgency=medium
+
+  * New upstream release 1.52.0
+  * Update standards version to 4.6.2, no changes needed.
+
+ -- Tomasz Buchert <tomasz@debian.org>  Mon, 20 Feb 2023 19:18:10 +0100
+
+nghttp2 (1.51.0-1) unstable; urgency=medium
+
+  [ Debian Janitor ]
+  * Set upstream metadata fields: Bug-Database, Bug-Submit, Repository,
+    Repository-Browse.
+  * Remove unused license definitions for SIL-OFL-1.1.
+
+  [ Tomasz Buchert ]
+  * New upstream release 1.51.0
+
+ -- Tomasz Buchert <tomasz@debian.org>  Sun, 11 Dec 2022 11:07:43 +0100
+
 nghttp2 (1.50.0-1pexip2) pexip; urgency=medium
 
   * Merge openssl3 changes to bullseye

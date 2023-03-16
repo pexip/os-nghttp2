@@ -3,6 +3,7 @@ package nghttp2
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/binary"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/tatsuhiro-t/go-nghttp2"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -42,7 +44,6 @@ func pair(name, value string) hpack.HeaderField {
 }
 
 type serverTester struct {
-	args          []string  // command-line arguments
 	cmd           *exec.Cmd // test frontend server process, which is test subject
 	url           string    // test frontend server URL
 	t             *testing.T
@@ -80,10 +81,17 @@ type options struct {
 	// before TLS handshake starts.  This field is ignored if tls
 	// is false.
 	tcpData []byte
+	// quic, if set to true, sets up QUIC frontend connection.
+	// quic implies tls = true.
+	quic bool
 }
 
 // newServerTester creates test context.
 func newServerTester(t *testing.T, opts options) *serverTester {
+	if opts.quic {
+		opts.tls = true
+	}
+
 	if opts.handler == nil {
 		opts.handler = noopHandler
 	}
@@ -182,6 +190,12 @@ func newServerTester(t *testing.T, opts options) *serverTester {
 	args = append(args, fmt.Sprintf("-f127.0.0.1,%v%v%v", serverPort, noTLS, proxyProto), b,
 		"--errorlog-file="+logDir+"/log.txt", "-LINFO")
 
+	if opts.quic {
+		args = append(args,
+			fmt.Sprintf("-f127.0.0.1,%v;quic", serverPort),
+			"--no-quic-bpf")
+	}
+
 	authority := fmt.Sprintf("127.0.0.1:%v", opts.connectPort)
 
 	st := &serverTester{
@@ -232,16 +246,11 @@ func newServerTester(t *testing.T, opts options) *serverTester {
 			tlsConn := tls.Client(conn, tlsConfig)
 			err = tlsConn.Handshake()
 			if err == nil {
-				cs := tlsConn.ConnectionState()
-				if !cs.NegotiatedProtocolIsMutual {
-					st.Close()
-					st.t.Fatalf("Error negotiated next protocol is not mutual")
-				}
 				conn = tlsConn
 			}
 		}
 		if err != nil {
-			retry += 1
+			retry++
 			if retry >= 100 {
 				st.Close()
 				st.t.Fatalf("Error server is not responding too long; server command-line arguments may be invalid")
@@ -268,16 +277,22 @@ func (st *serverTester) Close() {
 	if st.cmd != nil {
 		done := make(chan struct{})
 		go func() {
-			st.cmd.Wait()
+			if err := st.cmd.Wait(); err != nil {
+				st.t.Errorf("Error st.cmd.Wait() = %v", err)
+			}
 			close(done)
 		}()
 
-		st.cmd.Process.Signal(syscall.SIGQUIT)
+		if err := st.cmd.Process.Signal(syscall.SIGQUIT); err != nil {
+			st.t.Errorf("Error st.cmd.Process.Signal() = %v", err)
+		}
 
 		select {
 		case <-done:
 		case <-time.After(10 * time.Second):
-			st.cmd.Process.Kill()
+			if err := st.cmd.Process.Kill(); err != nil {
+				st.t.Errorf("Error st.cmd.Process.Kill() = %v", err)
+			}
 			<-done
 		}
 	}
@@ -340,7 +355,7 @@ func (cbr *chunkedBodyReader) Read(p []byte) (n int, err error) {
 	return cbr.body.Read(p)
 }
 
-func (st *serverTester) websocket(rp requestParam) (*serverResponse, error) {
+func (st *serverTester) websocket(rp requestParam) *serverResponse {
 	urlstring := st.url + "/echo"
 
 	config, err := websocket.NewConfig(urlstring, st.url)
@@ -370,6 +385,81 @@ func (st *serverTester) websocket(rp requestParam) (*serverResponse, error) {
 
 	res := &serverResponse{
 		body: msg[:n],
+	}
+
+	return res
+}
+
+func (st *serverTester) http3(rp requestParam) (*serverResponse, error) {
+	rt := &http3.RoundTripper{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+		},
+	}
+
+	defer rt.Close()
+
+	c := &http.Client{
+		Transport: rt,
+	}
+
+	method := "GET"
+	if rp.method != "" {
+		method = rp.method
+	}
+
+	var body io.Reader
+
+	if rp.body != nil {
+		body = bytes.NewBuffer(rp.body)
+	}
+
+	reqURL := st.url
+
+	if rp.path != "" {
+		u, err := url.Parse(st.url)
+		if err != nil {
+			st.t.Fatalf("Error parsing URL from st.url %v: %v", st.url, err)
+		}
+		u.Path = ""
+		u.RawQuery = ""
+		reqURL = u.String() + rp.path
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, h := range rp.header {
+		req.Header.Add(h.Name, h.Value)
+	}
+
+	req.Header.Add("Test-Case", rp.name)
+
+	// TODO http3 package does not support trailer at the time of
+	// this writing.
+
+	resp, err := c.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &serverResponse{
+		status:    resp.StatusCode,
+		header:    resp.Header,
+		body:      respBody,
+		connClose: resp.Close,
 	}
 
 	return res, nil
@@ -406,7 +496,10 @@ func (st *serverTester) http1(rp requestParam) (*serverResponse, error) {
 		reqURL = u.String() + rp.path
 	}
 
-	req, err := http.NewRequest(method, reqURL, body)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
 	if err != nil {
 		return nil, err
 	}
@@ -664,7 +757,9 @@ func cloneHeader(h http.Header) http.Header {
 }
 
 func noopHandler(w http.ResponseWriter, r *http.Request) {
-	io.ReadAll(r.Body)
+	if _, err := io.ReadAll(r.Body); err != nil {
+		http.Error(w, fmt.Sprintf("Error io.ReadAll() = %v", err), http.StatusInternalServerError)
+	}
 }
 
 type APIResponse struct {
@@ -704,9 +799,13 @@ const (
 	proxyProtocolV2ProtocolDgram  proxyProtocolV2Protocol = 0x2
 )
 
-func writeProxyProtocolV2(w io.Writer, hdr proxyProtocolV2) {
-	w.Write([]byte{0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A})
-	w.Write([]byte{byte(0x20 | hdr.command)})
+func writeProxyProtocolV2(w io.Writer, hdr proxyProtocolV2) error {
+	if _, err := w.Write([]byte{0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0x55, 0x49, 0x54, 0x0A}); err != nil {
+		return err
+	}
+	if _, err := w.Write([]byte{byte(0x20 | hdr.command)}); err != nil {
+		return err
+	}
 
 	switch srcAddr := hdr.sourceAddress.(type) {
 	case *net.TCPAddr:
@@ -721,13 +820,25 @@ func writeProxyProtocolV2(w io.Writer, hdr proxyProtocolV2) {
 			fam = byte(proxyProtocolV2FamilyInet6 << 4)
 		}
 		fam |= byte(proxyProtocolV2ProtocolStream)
-		w.Write([]byte{fam})
+		if _, err := w.Write([]byte{fam}); err != nil {
+			return err
+		}
 		length := uint16(len(srcAddr.IP)*2 + 4 + len(hdr.additionalData))
-		binary.Write(w, binary.BigEndian, length)
-		w.Write(srcAddr.IP)
-		w.Write(dstAddr.IP)
-		binary.Write(w, binary.BigEndian, uint16(srcAddr.Port))
-		binary.Write(w, binary.BigEndian, uint16(dstAddr.Port))
+		if err := binary.Write(w, binary.BigEndian, length); err != nil {
+			return err
+		}
+		if _, err := w.Write(srcAddr.IP); err != nil {
+			return err
+		}
+		if _, err := w.Write(dstAddr.IP); err != nil {
+			return err
+		}
+		if err := binary.Write(w, binary.BigEndian, uint16(srcAddr.Port)); err != nil {
+			return err
+		}
+		if err := binary.Write(w, binary.BigEndian, uint16(dstAddr.Port)); err != nil {
+			return err
+		}
 	case *net.UnixAddr:
 		dstAddr := hdr.destinationAddress.(*net.UnixAddr)
 		if len(srcAddr.Name) > 108 {
@@ -745,20 +856,40 @@ func writeProxyProtocolV2(w io.Writer, hdr proxyProtocolV2) {
 		default:
 			fam |= byte(proxyProtocolV2ProtocolUnspec)
 		}
-		w.Write([]byte{fam})
+		if _, err := w.Write([]byte{fam}); err != nil {
+			return err
+		}
 		length := uint16(216 + len(hdr.additionalData))
-		binary.Write(w, binary.BigEndian, length)
+		if err := binary.Write(w, binary.BigEndian, length); err != nil {
+			return err
+		}
 		zeros := make([]byte, 108)
-		w.Write([]byte(srcAddr.Name))
-		w.Write(zeros[:108-len(srcAddr.Name)])
-		w.Write([]byte(dstAddr.Name))
-		w.Write(zeros[:108-len(dstAddr.Name)])
+		if _, err := w.Write([]byte(srcAddr.Name)); err != nil {
+			return err
+		}
+		if _, err := w.Write(zeros[:108-len(srcAddr.Name)]); err != nil {
+			return err
+		}
+		if _, err := w.Write([]byte(dstAddr.Name)); err != nil {
+			return err
+		}
+		if _, err := w.Write(zeros[:108-len(dstAddr.Name)]); err != nil {
+			return err
+		}
 	default:
 		fam := byte(proxyProtocolV2FamilyUnspec<<4) | byte(proxyProtocolV2ProtocolUnspec)
-		w.Write([]byte{fam})
+		if _, err := w.Write([]byte{fam}); err != nil {
+			return err
+		}
 		length := uint16(len(hdr.additionalData))
-		binary.Write(w, binary.BigEndian, length)
+		if err := binary.Write(w, binary.BigEndian, length); err != nil {
+			return err
+		}
 	}
 
-	w.Write(hdr.additionalData)
+	if _, err := w.Write(hdr.additionalData); err != nil {
+		return err
+	}
+
+	return nil
 }
