@@ -1,3 +1,9 @@
+nghttp2 (1.52.0-1+deb12u1) bookworm-security; urgency=medium
+
+  * CVE-2023-44487 (Closes: #1053769)
+
+ -- Moritz Mühlenhoff <jmm@debian.org>  Fri, 24 Nov 2023 15:57:26 +0100
+
 nghttp2 (1.52.0-1pexip2) pexip-bookworm; urgency=medium
 
   * Initial bookworm build
