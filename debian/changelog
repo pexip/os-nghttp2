@@ -1,3 +1,13 @@
+nghttp2 (1.52.0-1+deb12u2) bookworm; urgency=medium
+
+  * Non-maintainer upload.
+  * CVE-2024-28182: unbounded number of HTTP/2 CONTINUATION frames DoS
+    (Closes: #1068415)
+  * nghttp2_option_set_stream_reset_rate_limit was added in
+    1.52.0-1+deb12u1, add to debian/libnghttp2-14.symbols
+
+ -- Adrian Bunk <bunk@debian.org>  Fri, 27 Sep 2024 16:25:38 +0300
+
 nghttp2 (1.52.0-1+deb12u1) bookworm-security; urgency=medium
 
   * CVE-2023-44487 (Closes: #1053769)
