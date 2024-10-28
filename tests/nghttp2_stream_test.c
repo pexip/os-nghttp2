@@ -24,6 +24,6 @@
  */
 #include "nghttp2_stream_test.h"
 
-#include <CUnit/CUnit.h>
+#include <stdio.h>
 
 #include "nghttp2_stream.h"

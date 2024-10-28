@@ -30,8 +30,16 @@
 #include <vector>
 #include <mutex>
 
-#include <openssl/ssl.h>
-#include <openssl/err.h>
+#include "ssl_compat.h"
+
+#ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <wolfssl/options.h>
+#  include <wolfssl/openssl/ssl.h>
+#  include <wolfssl/openssl/err.h>
+#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <openssl/ssl.h>
+#  include <openssl/err.h>
+#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
 
 #include <ev.h>
 
@@ -58,7 +66,7 @@ struct TLSSessionCache {
   // i2d_SSL_SESSION(3SSL).
   std::vector<uint8_t> session_data;
   // The last time stamp when this cache entry is created or updated.
-  ev_tstamp last_updated;
+  std::chrono::steady_clock::time_point last_updated;
 };
 
 // This struct stores the additional information per SSL_CTX.  This is
@@ -72,7 +80,11 @@ struct TLSContextData {
   std::mutex mu;
 #endif // !HAVE_ATOMIC_STD_SHARED_PTR
   // OCSP response
+#ifdef HAVE_ATOMIC_STD_SHARED_PTR
+  std::atomic<std::shared_ptr<std::vector<uint8_t>>> ocsp_data;
+#else  // !HAVE_ATOMIC_STD_SHARED_PTR
   std::shared_ptr<std::vector<uint8_t>> ocsp_data;
+#endif // !HAVE_ATOMIC_STD_SHARED_PTR
 
   // Path to certificate file
   const char *cert_file;
@@ -89,28 +101,12 @@ SSL_CTX *create_ssl_context(const char *private_key_file, const char *cert_file,
 );
 
 // Create client side SSL_CTX.  This does not configure ALPN settings.
-// |next_proto_select_cb| is for NPN.
 SSL_CTX *create_ssl_client_context(
 #ifdef HAVE_NEVERBLEED
-    neverbleed_t *nb,
+  neverbleed_t *nb,
 #endif // HAVE_NEVERBLEED
-    const StringRef &cacert, const StringRef &cert_file,
-    const StringRef &private_key_file,
-    int (*next_proto_select_cb)(SSL *s, unsigned char **out,
-                                unsigned char *outlen, const unsigned char *in,
-                                unsigned int inlen, void *arg));
-
-#ifdef ENABLE_HTTP3
-SSL_CTX *create_quic_ssl_client_context(
-#  ifdef HAVE_NEVERBLEED
-    neverbleed_t *nb,
-#  endif // HAVE_NEVERBLEED
-    const StringRef &cacert, const StringRef &cert_file,
-    const StringRef &private_key_file,
-    int (*next_proto_select_cb)(SSL *s, unsigned char **out,
-                                unsigned char *outlen, const unsigned char *in,
-                                unsigned int inlen, void *arg));
-#endif // ENABLE_HTTP3
+  const StringRef &cacert, const StringRef &cert_file,
+  const StringRef &private_key_file);
 
 ClientHandler *accept_connection(Worker *worker, int fd, sockaddr *addr,
                                  int addrlen, const UpstreamAddr *faddr);
@@ -122,9 +118,19 @@ int check_cert(SSL *ssl, const Address *addr, const StringRef &host);
 // point to &addr->addr.
 int check_cert(SSL *ssl, const DownstreamAddr *addr, const Address *raddr);
 
+// Verify |cert| using numeric IP address.  |hostname| and |addr|
+// should contain the same numeric IP address.  This function returns
+// 0 if it succeeds, or -1.
+int verify_numeric_hostname(X509 *cert, const StringRef &hostname,
+                            const Address *addr);
+
+// Verify |cert| using DNS name hostname.  This function returns 0 if
+// it succeeds, or -1.
+int verify_dns_hostname(X509 *cert, const StringRef &hostname);
+
 struct WildcardRevPrefix {
   WildcardRevPrefix(const StringRef &prefix, size_t idx)
-      : prefix(std::begin(prefix), std::end(prefix)), idx(idx) {}
+    : prefix(std::begin(prefix), std::end(prefix)), idx(idx) {}
 
   // "Prefix" of wildcard pattern.  It is reversed from original form.
   // For example, if the original wildcard is "test*.nghttp2.org",
@@ -192,8 +198,8 @@ private:
 // commonName is not considered.  |ssl_ctx| is also added to
 // |indexed_ssl_ctx|.  This function returns 0 if it succeeds, or -1.
 int cert_lookup_tree_add_ssl_ctx(
-    CertLookupTree *lt, std::vector<std::vector<SSL_CTX *>> &indexed_ssl_ctx,
-    SSL_CTX *ssl_ctx);
+  CertLookupTree *lt, std::vector<std::vector<SSL_CTX *>> &indexed_ssl_ctx,
+  SSL_CTX *ssl_ctx);
 
 // Returns true if |proto| is included in the
 // protocol list |protos|.
@@ -231,12 +237,12 @@ setup_server_ssl_context(std::vector<SSL_CTX *> &all_ssl_ctx,
 
 #ifdef ENABLE_HTTP3
 SSL_CTX *setup_quic_server_ssl_context(
-    std::vector<SSL_CTX *> &all_ssl_ctx,
-    std::vector<std::vector<SSL_CTX *>> &indexed_ssl_ctx,
-    CertLookupTree *cert_tree
+  std::vector<SSL_CTX *> &all_ssl_ctx,
+  std::vector<std::vector<SSL_CTX *>> &indexed_ssl_ctx,
+  CertLookupTree *cert_tree
 #  ifdef HAVE_NEVERBLEED
-    ,
-    neverbleed_t *nb
+  ,
+  neverbleed_t *nb
 #  endif // HAVE_NEVERBLEED
 );
 #endif // ENABLE_HTTP3
@@ -244,7 +250,7 @@ SSL_CTX *setup_quic_server_ssl_context(
 // Setups client side SSL_CTX.
 SSL_CTX *setup_downstream_client_ssl_context(
 #ifdef HAVE_NEVERBLEED
-    neverbleed_t *nb
+  neverbleed_t *nb
 #endif // HAVE_NEVERBLEED
 );
 
@@ -273,7 +279,7 @@ bool tls_hostname_match(const StringRef &pattern, const StringRef &hostname);
 // Depending on the existing cache's time stamp, |session| might not
 // be cached.
 void try_cache_tls_session(TLSSessionCache *cache, SSL_SESSION *session,
-                           ev_tstamp t);
+                           const std::chrono::steady_clock::time_point &t);
 
 // Returns cached session associated |addr|.  If no cache entry is
 // found associated to |addr|, nullptr will be returned.

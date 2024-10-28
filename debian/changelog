@@ -1,18 +1,83 @@
-nghttp2 (1.52.0-1+deb12u2) bookworm; urgency=medium
+nghttp2 (1.64.0-1) unstable; urgency=medium
 
-  * Non-maintainer upload.
-  * CVE-2024-28182: unbounded number of HTTP/2 CONTINUATION frames DoS
-    (Closes: #1068415)
-  * nghttp2_option_set_stream_reset_rate_limit was added in
-    1.52.0-1+deb12u1, add to debian/libnghttp2-14.symbols
+  * New upstream version 1.64.0
 
- -- Adrian Bunk <bunk@debian.org>  Fri, 27 Sep 2024 16:25:38 +0300
+ -- Tomasz Buchert <tomasz@debian.org>  Mon, 28 Oct 2024 20:45:36 +0100
 
-nghttp2 (1.52.0-1+deb12u1) bookworm-security; urgency=medium
+nghttp2 (1.63.0-1) unstable; urgency=medium
 
-  * CVE-2023-44487 (Closes: #1053769)
+  * New upstream version 1.63.0
+  * Update std-ver to 4.7.0
 
- -- Moritz Mühlenhoff <jmm@debian.org>  Fri, 24 Nov 2023 15:57:26 +0100
+ -- Tomasz Buchert <tomasz@debian.org>  Sun, 01 Sep 2024 08:23:00 +0200
+
+nghttp2 (1.62.1-2) unstable; urgency=medium
+
+  [ Helmut Grohne ]
+  * Install systemd unit using dh_installsystemd. (Closes: #1073057)
+
+ -- Tomasz Buchert <tomasz@debian.org>  Wed, 10 Jul 2024 22:55:43 +0200
+
+nghttp2 (1.62.1-1) unstable; urgency=medium
+
+  * New upstream version 1.62.1
+
+ -- Tomasz Buchert <tomasz@debian.org>  Sat, 18 May 2024 09:28:10 +0200
+
+nghttp2 (1.61.0-1) unstable; urgency=high
+
+  * New upstream version 1.61.0 (fixes CVE-2024-28182)
+
+ -- Tomasz Buchert <tomasz@debian.org>  Fri, 05 Apr 2024 00:56:35 +0200
+
+nghttp2 (1.60.0-1) unstable; urgency=medium
+
+  * New upstream version 1.60.0
+
+ -- Tomasz Buchert <tomasz@debian.org>  Fri, 08 Mar 2024 22:31:26 +0100
+
+nghttp2 (1.59.0-1) unstable; urgency=medium
+
+  * New upstream version 1.59.0
+
+ -- Tomasz Buchert <tomasz@debian.org>  Thu, 01 Feb 2024 23:43:52 +0100
+
+nghttp2 (1.58.0-1) unstable; urgency=medium
+
+  * New upstream version 1.58.0
+
+ -- Tomasz Buchert <tomasz@debian.org>  Sat, 04 Nov 2023 23:21:22 +0100
+
+nghttp2 (1.57.0-1) unstable; urgency=medium
+
+  * New upstream version 1.57.0
+  * Fixes HTTP/2 Rapid Reset advisory
+
+ -- Tomasz Buchert <tomasz@debian.org>  Thu, 12 Oct 2023 23:19:30 +0200
+
+nghttp2 (1.56.0-1) unstable; urgency=medium
+
+  * New upstream version 1.56.0
+
+ -- Tomasz Buchert <tomasz@debian.org>  Tue, 05 Sep 2023 08:39:33 +0200
+
+nghttp2 (1.55.1-1) unstable; urgency=medium
+
+  * New upstream version 1.55.1 (1.55.0 skipped intentionally)
+
+ -- Tomasz Buchert <tomasz@debian.org>  Wed, 19 Jul 2023 08:03:17 +0200
+
+nghttp2 (1.54.0-1) unstable; urgency=medium
+
+  * New upstream version 1.54.0
+
+ -- Tomasz Buchert <tomasz@debian.org>  Sat, 10 Jun 2023 09:25:26 +0200
+
+nghttp2 (1.53.0-1) unstable; urgency=medium
+
+  * New upstream version 1.53.0
+
+ -- Tomasz Buchert <tomasz@debian.org>  Sun, 21 May 2023 15:46:26 +0200
 
 nghttp2 (1.52.0-1) unstable; urgency=medium
 

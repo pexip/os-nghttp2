@@ -1,7 +1,7 @@
 /*
  * nghttp2 - HTTP/2 C Library
  *
- * Copyright (c) 2012 Twist Inc.
+ * Copyright (c) 2023 nghttp2 contributors
  *
  * Permission is hereby granted, free of charge, to any person obtaining
  * a copy of this software and associated documentation files (the
@@ -22,13 +22,20 @@
  * OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
  * WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
  */
-#ifndef NGHTTP2_NPN_TEST_H
-#define NGHTTP2_NPN_TEST_H
+#ifndef NGHTTP2_RATELIM_TEST_H
+#define NGHTTP2_RATELIM_TEST_H
 
 #ifdef HAVE_CONFIG_H
 #  include <config.h>
 #endif /* HAVE_CONFIG_H */
 
-void test_nghttp2_npn(void);
+#define MUNIT_ENABLE_ASSERT_ALIASES
 
-#endif /* NGHTTP2_NPN_TEST_H */
+#include "munit.h"
+
+extern const MunitSuite ratelim_suite;
+
+munit_void_test_decl(test_nghttp2_ratelim_update)
+munit_void_test_decl(test_nghttp2_ratelim_drain)
+
+#endif /* NGHTTP2_RATELIM_TEST_H */

@@ -25,54 +25,31 @@
 #include "tls.h"
 
 #include <cassert>
+#include <cstring>
 #include <vector>
 #include <mutex>
 #include <iostream>
+#include <fstream>
 
-#include <openssl/crypto.h>
-#include <openssl/conf.h>
+#ifdef HAVE_LIBBROTLI
+#  include <brotli/encode.h>
+#  include <brotli/decode.h>
+#endif // HAVE_LIBBROTLI
 
 #include "ssl_compat.h"
+
+#ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <wolfssl/options.h>
+#  include <wolfssl/openssl/crypto.h>
+#  include <wolfssl/openssl/conf.h>
+#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <openssl/crypto.h>
+#  include <openssl/conf.h>
+#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
 
 namespace nghttp2 {
 
 namespace tls {
-
-#if OPENSSL_1_1_API
-
-// CRYPTO_LOCK is deprecated as of OpenSSL 1.1.0
-LibsslGlobalLock::LibsslGlobalLock() {}
-
-#else // !OPENSSL_1_1_API
-
-namespace {
-std::mutex *ssl_global_locks;
-} // namespace
-
-namespace {
-void ssl_locking_cb(int mode, int type, const char *file, int line) {
-  if (mode & CRYPTO_LOCK) {
-    ssl_global_locks[type].lock();
-  } else {
-    ssl_global_locks[type].unlock();
-  }
-}
-} // namespace
-
-LibsslGlobalLock::LibsslGlobalLock() {
-  if (ssl_global_locks) {
-    std::cerr << "OpenSSL global lock has been already set" << std::endl;
-    assert(0);
-  }
-  ssl_global_locks = new std::mutex[CRYPTO_num_locks()];
-  // CRYPTO_set_id_callback(ssl_thread_id); OpenSSL manual says that
-  // if threadid_func is not specified using
-  // CRYPTO_THREADID_set_callback(), then default implementation is
-  // used. We use this default one.
-  CRYPTO_set_locking_callback(ssl_locking_cb);
-}
-
-#endif // !OPENSSL_1_1_API
 
 const char *get_tls_protocol(SSL *ssl) {
   switch (SSL_version(ssl)) {
@@ -124,13 +101,13 @@ TLSSessionInfo *get_tls_session_info(TLSSessionInfo *tls_info, SSL *ssl) {
   ((0x0000 <= id && id <= 0x00FF &&                                            \
     "\xFF\xFF\xFF\xCF\xFF\xFF\xFF\xFF\x7F\x00\x00\x00\x80\x3F\x00\x00"         \
     "\xF0\xFF\xFF\x3F\xF3\xF3\xFF\xFF\x3F\x00\x00\x00\x00\x00\x00\x80"         \
-            [(id & 0xFF) / 8] &                                                \
-        (1 << (id % 8))) ||                                                    \
+        [(id & 0xFF) / 8] &                                                    \
+      (1 << (id % 8))) ||                                                      \
    (0xC000 <= id && id <= 0xC0FF &&                                            \
     "\xFE\xFF\xFF\xFF\xFF\x67\xFE\xFF\xFF\xFF\x33\xCF\xFC\xCF\xFF\xCF"         \
     "\x3C\xF3\xFC\x3F\x33\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"         \
-            [(id & 0xFF) / 8] &                                                \
-        (1 << (id % 8))))
+        [(id & 0xFF) / 8] &                                                    \
+      (1 << (id % 8))))
 
 bool check_http2_cipher_block_list(SSL *ssl) {
   int id = SSL_CIPHER_get_id(SSL_get_current_cipher(ssl)) & 0xFFFFFF;
@@ -148,53 +125,101 @@ bool check_http2_requirement(SSL *ssl) {
   return check_http2_tls_version(ssl) && !check_http2_cipher_block_list(ssl);
 }
 
-void libssl_init() {
-#if OPENSSL_1_1_API
-// No explicit initialization is required.
-#elif defined(OPENSSL_IS_BORINGSSL)
-  CRYPTO_library_init();
-#else  // !OPENSSL_1_1_API && !defined(OPENSSL_IS_BORINGSSL)
-  OPENSSL_config(nullptr);
-  SSL_load_error_strings();
-  SSL_library_init();
-  OpenSSL_add_all_algorithms();
-#endif // !OPENSSL_1_1_API && !defined(OPENSSL_IS_BORINGSSL)
-}
-
 int ssl_ctx_set_proto_versions(SSL_CTX *ssl_ctx, int min, int max) {
-#if OPENSSL_1_1_API || defined(OPENSSL_IS_BORINGSSL)
   if (SSL_CTX_set_min_proto_version(ssl_ctx, min) != 1 ||
       SSL_CTX_set_max_proto_version(ssl_ctx, max) != 1) {
     return -1;
   }
   return 0;
-#else  // !OPENSSL_1_1_API && !defined(OPENSSL_IS_BORINGSSL)
-  long int opts = 0;
+}
 
-  // TODO We depends on the ordering of protocol version macro in
-  // OpenSSL.
-  if (min > TLS1_VERSION) {
-    opts |= SSL_OP_NO_TLSv1;
-  }
-  if (min > TLS1_1_VERSION) {
-    opts |= SSL_OP_NO_TLSv1_1;
-  }
-  if (min > TLS1_2_VERSION) {
-    opts |= SSL_OP_NO_TLSv1_2;
+#if defined(NGHTTP2_OPENSSL_IS_BORINGSSL) && defined(HAVE_LIBBROTLI)
+int cert_compress(SSL *ssl, CBB *out, const uint8_t *in, size_t in_len) {
+  uint8_t *dest;
+
+  auto compressed_size = BrotliEncoderMaxCompressedSize(in_len);
+  if (compressed_size == 0) {
+    return 0;
   }
 
-  if (max < TLS1_2_VERSION) {
-    opts |= SSL_OP_NO_TLSv1_2;
-  }
-  if (max < TLS1_1_VERSION) {
-    opts |= SSL_OP_NO_TLSv1_1;
+  if (!CBB_reserve(out, &dest, compressed_size)) {
+    return 0;
   }
 
-  SSL_CTX_set_options(ssl_ctx, opts);
+  if (BrotliEncoderCompress(BROTLI_MAX_QUALITY, BROTLI_DEFAULT_WINDOW,
+                            BROTLI_MODE_GENERIC, in_len, in, &compressed_size,
+                            dest) != BROTLI_TRUE) {
+    return 0;
+  }
+
+  if (!CBB_did_write(out, compressed_size)) {
+    return 0;
+  }
+
+  return 1;
+}
+
+int cert_decompress(SSL *ssl, CRYPTO_BUFFER **out, size_t uncompressed_len,
+                    const uint8_t *in, size_t in_len) {
+  uint8_t *dest;
+  auto buf = CRYPTO_BUFFER_alloc(&dest, uncompressed_len);
+  auto len = uncompressed_len;
+
+  if (BrotliDecoderDecompress(in_len, in, &len, dest) !=
+      BROTLI_DECODER_RESULT_SUCCESS) {
+    CRYPTO_BUFFER_free(buf);
+
+    return 0;
+  }
+
+  if (uncompressed_len != len) {
+    CRYPTO_BUFFER_free(buf);
+
+    return 0;
+  }
+
+  *out = buf;
+
+  return 1;
+}
+#endif // NGHTTP2_OPENSSL_IS_BORINGSSL && HAVE_LIBBROTLI
+
+#if defined(NGHTTP2_GENUINE_OPENSSL) ||                                        \
+  defined(NGHTTP2_OPENSSL_IS_BORINGSSL) ||                                     \
+  defined(NGHTTP2_OPENSSL_IS_LIBRESSL) ||                                      \
+  (defined(NGHTTP2_OPENSSL_IS_WOLFSSL) && defined(HAVE_SECRET_CALLBACK))
+namespace {
+std::ofstream keylog_file;
+
+void keylog_callback(const SSL *ssl, const char *line) {
+  keylog_file.write(line, strlen(line));
+  keylog_file.put('\n');
+  keylog_file.flush();
+}
+} // namespace
+
+int setup_keylog_callback(SSL_CTX *ssl_ctx) {
+  auto keylog_filename = getenv("SSLKEYLOGFILE");
+  if (!keylog_filename) {
+    return 0;
+  }
+
+  keylog_file.open(keylog_filename, std::ios_base::app);
+  if (!keylog_file) {
+    return -1;
+  }
+
+  SSL_CTX_set_keylog_callback(ssl_ctx, keylog_callback);
 
   return 0;
-#endif // !OPENSSL_1_1_API && !defined(OPENSSL_IS_BORINGSSL)
 }
+#else  // !NGHTTP2_GENUINE_OPENSSL && !NGHTTP2_OPENSSL_IS_BORINGSSL &&
+       // !NGHTTP2_OPENSSL_IS_LIBRESSL && !(NGHTTP2_OPENSSL_IS_WOLFSSL &&
+       // HAVE_SECRET_CALLBACK)
+int setup_keylog_callback(SSL_CTX *ssl_ctx) { return 0; }
+#endif // !NGHTTP2_GENUINE_OPENSSL && !NGHTTP2_OPENSSL_IS_BORINGSSL &&
+       // !NGHTTP2_OPENSSL_IS_LIBRESSL && !(NGHTTP2_OPENSSL_IS_WOLFSSL &&
+       // HAVE_SECRET_CALLBACK)
 
 } // namespace tls
 

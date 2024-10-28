@@ -43,6 +43,7 @@
 #include <chrono>
 #include <array>
 
+#define NGHTTP2_NO_SSIZE_T
 #include <nghttp2/nghttp2.h>
 
 #ifdef ENABLE_HTTP3
@@ -52,7 +53,14 @@
 
 #include <ev.h>
 
-#include <openssl/ssl.h>
+#include "ssl_compat.h"
+
+#ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <wolfssl/options.h>
+#  include <wolfssl/openssl/ssl.h>
+#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <openssl/ssl.h>
+#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
 
 #include "http2.h"
 #ifdef ENABLE_HTTP3
@@ -73,7 +81,7 @@ struct Worker;
 struct Config {
   std::vector<std::vector<nghttp2_nv>> nva;
   std::vector<std::string> h1reqs;
-  std::vector<ev_tstamp> timings;
+  std::vector<std::chrono::steady_clock::duration> timings;
   nghttp2::Headers custom_headers;
   std::string scheme;
   std::string host;
@@ -92,7 +100,7 @@ struct Config {
   size_t nclients;
   size_t nthreads;
   // The maximum number of concurrent streams per session.
-  ssize_t max_concurrent_streams;
+  size_t max_concurrent_streams;
   size_t window_bits;
   size_t connection_window_bits;
   size_t max_frame_size;
@@ -127,9 +135,9 @@ struct Config {
   bool base_uri_unix;
   // used when UNIX domain socket is used (base_uri_unix is true).
   sockaddr_un unix_addr;
-  // list of supported NPN/ALPN protocol strings in the order of
+  // list of supported ALPN protocol strings in the order of
   // preference.
-  std::vector<std::string> npn_list;
+  std::vector<std::string> alpn_list;
   // The number of request per second for each client.
   double rps;
   // Disables GSO for UDP connections.
@@ -138,6 +146,9 @@ struct Config {
   size_t max_udp_payload_size;
   // Enable ktls.
   bool ktls;
+  // sni is the value sent in TLS SNI, overriding DNS name of the
+  // remote host.
+  std::string sni;
 
   Config();
   ~Config();
@@ -342,7 +353,7 @@ struct Client {
     ngtcp2_crypto_conn_ref conn_ref;
     ev_timer pkt_timer;
     ngtcp2_conn *conn;
-    ngtcp2_connection_close_error last_error;
+    ngtcp2_ccerr last_error;
     bool close_requested;
     FILE *qlog_file;
 
@@ -396,7 +407,7 @@ struct Client {
   ev_timer rps_watcher;
   // The timestamp that starts the period which contributes to the
   // next request generation.
-  ev_tstamp rps_duration_started;
+  std::chrono::steady_clock::time_point rps_duration_started;
   // The number of requests allowed by rps, but limited by stream
   // concurrency.
   size_t rps_req_pending;
@@ -494,8 +505,9 @@ struct Client {
   int quic_stream_reset(int64_t stream_id, uint64_t app_error_code);
   int quic_stream_stop_sending(int64_t stream_id, uint64_t app_error_code);
   int quic_extend_max_local_streams();
+  int quic_extend_max_stream_data(int64_t stream_id);
 
-  int quic_write_client_handshake(ngtcp2_crypto_level level,
+  int quic_write_client_handshake(ngtcp2_encryption_level level,
                                   const uint8_t *data, size_t datalen);
   int quic_pkt_timeout();
   void quic_restart_pkt_timer();

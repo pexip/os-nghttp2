@@ -37,7 +37,7 @@ void readcb(struct ev_loop *loop, ev_io *w, int revent) {
 } // namespace
 
 QUICListener::QUICListener(const UpstreamAddr *faddr, Worker *worker)
-    : faddr_{faddr}, worker_{worker} {
+  : faddr_{faddr}, worker_{worker} {
   ev_io_init(&rev_, readcb, faddr_->fd, EV_READ);
   rev_.data = this;
   ev_io_start(worker_->get_loop(), &rev_);
@@ -59,8 +59,8 @@ void QUICListener::on_read() {
   msg.msg_iov = &msg_iov;
   msg.msg_iovlen = 1;
 
-  uint8_t
-      msg_ctrl[CMSG_SPACE(sizeof(uint8_t)) + CMSG_SPACE(sizeof(in6_pktinfo))];
+  uint8_t msg_ctrl[CMSG_SPACE(sizeof(int)) + CMSG_SPACE(sizeof(in6_pktinfo)) +
+                   CMSG_SPACE(sizeof(int))];
   msg.msg_control = msg_ctrl;
 
   auto quic_conn_handler = worker_->get_quic_connection_handler();
@@ -74,38 +74,70 @@ void QUICListener::on_read() {
       return;
     }
 
-    ++pktcnt;
+    // Packets less than 22 bytes never be a valid QUIC packet.
+    if (nread < 22) {
+      ++pktcnt;
+
+      continue;
+    }
+
+    if (util::quic_prohibited_port(util::get_port(&su))) {
+      ++pktcnt;
+
+      continue;
+    }
 
     Address local_addr{};
     if (util::msghdr_get_local_addr(local_addr, &msg, su.storage.ss_family) !=
         0) {
+      ++pktcnt;
+
       continue;
     }
 
     util::set_port(local_addr, faddr_->port);
 
     ngtcp2_pkt_info pi{
-        .ecn = util::msghdr_get_ecn(&msg, su.storage.ss_family),
+      .ecn = util::msghdr_get_ecn(&msg, su.storage.ss_family),
     };
 
-    if (LOG_ENABLED(INFO)) {
-      LOG(INFO) << "QUIC received packet: local="
-                << util::to_numeric_addr(&local_addr)
-                << " remote=" << util::to_numeric_addr(&su.sa, msg.msg_namelen)
-                << " ecn=" << log::hex << pi.ecn << log::dec << " " << nread
-                << " bytes";
+    auto gso_size = util::msghdr_get_udp_gro(&msg);
+    if (gso_size == 0) {
+      gso_size = static_cast<size_t>(nread);
     }
 
-    if (nread == 0) {
-      continue;
+    auto data = std::span{std::begin(buf), static_cast<size_t>(nread)};
+
+    for (;;) {
+      auto datalen = std::min(data.size(), gso_size);
+
+      ++pktcnt;
+
+      if (LOG_ENABLED(INFO)) {
+        LOG(INFO) << "QUIC received packet: local="
+                  << util::to_numeric_addr(&local_addr) << " remote="
+                  << util::to_numeric_addr(&su.sa, msg.msg_namelen)
+                  << " ecn=" << log::hex << pi.ecn << log::dec << " " << datalen
+                  << " bytes";
+      }
+
+      // Packets less than 22 bytes never be a valid QUIC packet.
+      if (datalen < 22) {
+        break;
+      }
+
+      Address remote_addr;
+      remote_addr.su = su;
+      remote_addr.len = msg.msg_namelen;
+
+      quic_conn_handler->handle_packet(faddr_, remote_addr, local_addr, pi,
+                                       {std::begin(data), datalen});
+
+      data = data.subspan(datalen);
+      if (data.empty()) {
+        break;
+      }
     }
-
-    Address remote_addr;
-    remote_addr.su = su;
-    remote_addr.len = msg.msg_namelen;
-
-    quic_conn_handler->handle_packet(faddr_, remote_addr, local_addr, pi,
-                                     buf.data(), nread);
   }
 }
 

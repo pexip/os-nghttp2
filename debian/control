@@ -13,10 +13,10 @@ Build-Depends: debhelper (>= 13),
                libssl-dev,
                libsystemd-dev,
                libxml2-dev,
-               pkg-config,
+               pkgconf,
                zlib1g-dev
 Build-Depends-Indep: python3-sphinx, python3-sphinx-rtd-theme
-Standards-Version: 4.6.2
+Standards-Version: 4.7.0
 Vcs-Browser: https://salsa.debian.org/debian/nghttp2
 Vcs-Git: https://salsa.debian.org/debian/nghttp2.git
 Homepage: https://nghttp2.org/
@@ -26,7 +26,7 @@ Package: libnghttp2-dev
 Architecture: any
 Multi-Arch: same
 Section: libdevel
-Depends: libnghttp2-14 (= ${binary:Version}), pkg-config, ${misc:Depends}
+Depends: libnghttp2-14 (= ${binary:Version}), pkgconf, ${misc:Depends}
 Suggests: libnghttp2-doc
 Conflicts: libnghttp2-3-dev, libnghttp2-4-dev, libnghttp2-5-dev
 Replaces: libnghttp2-3-dev, libnghttp2-4-dev, libnghttp2-5-dev
