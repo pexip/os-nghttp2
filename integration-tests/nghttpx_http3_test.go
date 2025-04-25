@@ -5,6 +5,7 @@ package nghttp2
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	"io"
 	"net/http"
 	"regexp"
@@ -35,13 +36,14 @@ func TestH3H1PlainGET(t *testing.T) {
 // TestH3H1RequestBody tests HTTP/3 request with body works.
 func TestH3H1RequestBody(t *testing.T) {
 	body := make([]byte, 3333)
+
 	_, err := rand.Read(body)
 	if err != nil {
 		t.Fatalf("Unable to create request body: %v", err)
 	}
 
 	opts := options{
-		handler: func(w http.ResponseWriter, r *http.Request) {
+		handler: func(_ http.ResponseWriter, r *http.Request) {
 			buf := make([]byte, 4096)
 			buflen := 0
 			p := buf
@@ -57,7 +59,7 @@ func TestH3H1RequestBody(t *testing.T) {
 				buflen += n
 
 				if err != nil {
-					if err == io.EOF {
+					if errors.Is(err, io.EOF) {
 						break
 					}
 
@@ -73,6 +75,7 @@ func TestH3H1RequestBody(t *testing.T) {
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -83,6 +86,7 @@ func TestH3H1RequestBody(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error st.http3() = %v", err)
 	}
+
 	if got, want := res.status, http.StatusOK; got != want {
 		t.Errorf("res.status: %v; want %v", got, want)
 	}
@@ -92,13 +96,14 @@ func TestH3H1RequestBody(t *testing.T) {
 // and from backend server.
 func TestH3H1GenerateVia(t *testing.T) {
 	opts := options{
-		handler: func(w http.ResponseWriter, r *http.Request) {
+		handler: func(_ http.ResponseWriter, r *http.Request) {
 			if got, want := r.Header.Get("Via"), "3 nghttpx"; got != want {
 				t.Errorf("Via: %v; want %v", got, want)
 			}
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -108,6 +113,7 @@ func TestH3H1GenerateVia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error st.http3() = %v", err)
 	}
+
 	if got, want := res.header.Get("Via"), "1.1 nghttpx"; got != want {
 		t.Errorf("Via: %v; want %v", got, want)
 	}
@@ -125,6 +131,7 @@ func TestH3H1AppendVia(t *testing.T) {
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -137,6 +144,7 @@ func TestH3H1AppendVia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error st.http3() = %v", err)
 	}
+
 	if got, want := res.header.Get("Via"), "bar, 1.1 nghttpx"; got != want {
 		t.Errorf("Via: %v; want %v", got, want)
 	}
@@ -155,6 +163,7 @@ func TestH3H1NoVia(t *testing.T) {
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -167,6 +176,7 @@ func TestH3H1NoVia(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error st.http3() = %v", err)
 	}
+
 	if got, want := res.header.Get("Via"), "bar"; got != want {
 		t.Errorf("Via: %v; want %v", got, want)
 	}
@@ -177,7 +187,7 @@ func TestH3H1NoVia(t *testing.T) {
 // response body size.
 func TestH3H1BadResponseCL(t *testing.T) {
 	opts := options{
-		handler: func(w http.ResponseWriter, r *http.Request) {
+		handler: func(w http.ResponseWriter, _ *http.Request) {
 			// we set content-length: 1024, but only send 3 bytes.
 			w.Header().Add("Content-Length", "1024")
 			if _, err := w.Write([]byte("foo")); err != nil {
@@ -186,6 +196,7 @@ func TestH3H1BadResponseCL(t *testing.T) {
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -204,6 +215,7 @@ func TestH3H1HTTPSRedirect(t *testing.T) {
 		args: []string{"--redirect-if-not-tls"},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -226,6 +238,7 @@ func TestH3H1AffinityCookieTLS(t *testing.T) {
 		args: []string{"--affinity-cookie"},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -243,6 +256,7 @@ func TestH3H1AffinityCookieTLS(t *testing.T) {
 
 	const pattern = `affinity=[0-9a-f]{8}; Path=/foo/bar; Secure`
 	validCookie := regexp.MustCompile(pattern)
+
 	if got := res.header.Get("Set-Cookie"); !validCookie.MatchString(got) {
 		t.Errorf("Set-Cookie: %v; want pattern %v", got, pattern)
 	}
@@ -256,11 +270,12 @@ func TestH3H2ReqPhaseReturn(t *testing.T) {
 			"--http2-bridge",
 			"--mruby-file=" + testDir + "/req-return.rb",
 		},
-		handler: func(w http.ResponseWriter, r *http.Request) {
+		handler: func(http.ResponseWriter, *http.Request) {
 			t.Fatalf("request should not be forwarded")
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -302,6 +317,7 @@ func TestH3H2RespPhaseReturn(t *testing.T) {
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -338,11 +354,12 @@ func TestH3H2RespPhaseReturn(t *testing.T) {
 func TestH3ResponseBeforeRequestEnd(t *testing.T) {
 	opts := options{
 		args: []string{"--mruby-file=" + testDir + "/req-return.rb"},
-		handler: func(w http.ResponseWriter, r *http.Request) {
+		handler: func(http.ResponseWriter, *http.Request) {
 			t.Fatal("request should not be forwarded")
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 
@@ -353,6 +370,7 @@ func TestH3ResponseBeforeRequestEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Error st.http3() = %v", err)
 	}
+
 	if got, want := res.status, http.StatusNotFound; got != want {
 		t.Errorf("res.status: %v; want %v", got, want)
 	}
@@ -362,7 +380,7 @@ func TestH3ResponseBeforeRequestEnd(t *testing.T) {
 // backend chunked encoded response ends prematurely.
 func TestH3H1ChunkedEndsPrematurely(t *testing.T) {
 	opts := options{
-		handler: func(w http.ResponseWriter, r *http.Request) {
+		handler: func(w http.ResponseWriter, _ *http.Request) {
 			hj, ok := w.(http.Hijacker)
 			if !ok {
 				http.Error(w, "Could not hijack the connection", http.StatusInternalServerError)
@@ -381,6 +399,7 @@ func TestH3H1ChunkedEndsPrematurely(t *testing.T) {
 		},
 		quic: true,
 	}
+
 	st := newServerTester(t, opts)
 	defer st.Close()
 

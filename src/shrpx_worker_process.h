@@ -42,13 +42,15 @@ class ConnectionHandler;
 struct WorkerProcessConfig {
   // IPC socket to read event from main process
   int ipc_fd;
+  // IPC socket to tell that a worker process is ready for service.
+  int ready_ipc_fd;
   // IPv4 or UNIX domain socket, or -1 if not used
   int server_fd;
   // IPv6 socket, or -1 if not used
   int server_fd6;
 #ifdef ENABLE_HTTP3
-  // CID prefixes for the new worker process.
-  std::vector<std::array<uint8_t, SHRPX_QUIC_CID_PREFIXLEN>> cid_prefixes;
+  // Worker IDs for the new worker process.
+  std::vector<WorkerID> worker_ids;
   // IPC socket to read forwarded QUIC UDP datagram from the current
   // worker process.
   int quic_ipc_fd;

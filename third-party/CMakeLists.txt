@@ -29,6 +29,7 @@ if(ENABLE_THIRD_PARTY)
       "${CMAKE_SOURCE_DIR}/third-party/neverbleed"
     )
     target_link_libraries(neverbleed ${OPENSSL_LIBRARIES})
+    target_compile_definitions(neverbleed PUBLIC _GNU_SOURCE)
   endif()
 
   if(HAVE_MRUBY)
@@ -58,7 +59,7 @@ if(ENABLE_THIRD_PARTY)
         "MRUBY_CONFIG=${CMAKE_CURRENT_SOURCE_DIR}/build_config.rb"
         "BUILD_DIR=${MRUBY_BUILD_DIR}"
         "INSTALL_DIR=${MRUBY_BUILD_DIR}/install/bin"
-        "CC=${CMAKE_C_COMPILER}" "CXX=${CMAKE_CXX_COMPILER}"
+        "MRUBY_CC=${CMAKE_C_COMPILER}" "MRUBY_CXX=${CMAKE_CXX_COMPILER}"
         "${CMAKE_CURRENT_SOURCE_DIR}/mruby/minirake"
         -f "${CMAKE_CURRENT_SOURCE_DIR}/mruby/Rakefile"
       ${_byproducts}

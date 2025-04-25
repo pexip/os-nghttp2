@@ -53,8 +53,6 @@
 #include <iomanip>
 #include <fstream>
 
-#include <zlib.h>
-
 #include "app_helper.h"
 #include "util.h"
 #include "http2.h"
@@ -117,11 +115,11 @@ std::string strframetype(uint8_t type) {
   }
 
   std::string s = "extension(0x";
-  s += util::format_hex(&type, 1);
+  s += util::format_hex(std::span{&type, 1});
   s += ')';
 
   return s;
-};
+}
 } // namespace
 
 namespace {
@@ -331,20 +329,20 @@ void print_frame(print_type ptype, const nghttp2_frame *frame) {
   case NGHTTP2_PING:
     print_frame_attr_indent();
     fprintf(outfile, "(opaque_data=%s)\n",
-            util::format_hex(frame->ping.opaque_data, 8).c_str());
+            util::format_hex(frame->ping.opaque_data).c_str());
     break;
   case NGHTTP2_GOAWAY:
     print_frame_attr_indent();
-    fprintf(outfile,
-            "(last_stream_id=%d, error_code=%s(0x%02x), "
-            "opaque_data(%u)=[%s])\n",
-            frame->goaway.last_stream_id,
-            nghttp2_http2_strerror(frame->goaway.error_code),
-            frame->goaway.error_code,
-            static_cast<unsigned int>(frame->goaway.opaque_data_len),
-            util::ascii_dump(frame->goaway.opaque_data,
-                             frame->goaway.opaque_data_len)
-                .c_str());
+    fprintf(
+      outfile,
+      "(last_stream_id=%d, error_code=%s(0x%02x), "
+      "opaque_data(%u)=[%s])\n",
+      frame->goaway.last_stream_id,
+      nghttp2_http2_strerror(frame->goaway.error_code),
+      frame->goaway.error_code,
+      static_cast<unsigned int>(frame->goaway.opaque_data_len),
+      util::ascii_dump(frame->goaway.opaque_data, frame->goaway.opaque_data_len)
+        .c_str());
     break;
   case NGHTTP2_WINDOW_UPDATE:
     print_frame_attr_indent();
@@ -370,7 +368,7 @@ void print_frame(print_type ptype, const nghttp2_frame *frame) {
   }
   case NGHTTP2_PRIORITY_UPDATE: {
     auto priority_update =
-        static_cast<nghttp2_ext_priority_update *>(frame->ext.payload);
+      static_cast<nghttp2_ext_priority_update *>(frame->ext.payload);
     print_frame_attr_indent();
     fprintf(outfile,
             "(prioritized_stream_id=%d, priority_field_value=[%.*s])\n",
@@ -443,7 +441,7 @@ int verbose_on_data_chunk_recv_callback(nghttp2_session *session, uint8_t flags,
                                         size_t len, void *user_data) {
   print_timer();
   auto srecv =
-      nghttp2_session_get_stream_effective_recv_data_length(session, stream_id);
+    nghttp2_session_get_stream_effective_recv_data_length(session, stream_id);
   auto crecv = nghttp2_session_get_effective_recv_data_length(session);
 
   fprintf(outfile,
@@ -475,49 +473,6 @@ std::chrono::milliseconds get_timer() {
 
 std::chrono::steady_clock::time_point get_time() {
   return std::chrono::steady_clock::now();
-}
-
-ssize_t deflate_data(uint8_t *out, size_t outlen, const uint8_t *in,
-                     size_t inlen) {
-  int rv;
-  z_stream zst;
-  uint8_t temp_out[8_k];
-  auto temp_outlen = sizeof(temp_out);
-
-  zst.next_in = Z_NULL;
-  zst.zalloc = Z_NULL;
-  zst.zfree = Z_NULL;
-  zst.opaque = Z_NULL;
-
-  rv = deflateInit2(&zst, Z_DEFAULT_COMPRESSION, Z_DEFLATED, 31, 9,
-                    Z_DEFAULT_STRATEGY);
-
-  if (rv != Z_OK) {
-    return -1;
-  }
-
-  zst.avail_in = inlen;
-  zst.next_in = (uint8_t *)in;
-  zst.avail_out = temp_outlen;
-  zst.next_out = temp_out;
-
-  rv = deflate(&zst, Z_FINISH);
-
-  deflateEnd(&zst);
-
-  if (rv != Z_STREAM_END) {
-    return -1;
-  }
-
-  temp_outlen -= zst.avail_out;
-
-  if (temp_outlen > outlen) {
-    return -1;
-  }
-
-  memcpy(out, temp_out, temp_outlen);
-
-  return temp_outlen;
 }
 
 } // namespace nghttp2

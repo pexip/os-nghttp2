@@ -15,12 +15,16 @@ include_directories(
   ${LIBEV_INCLUDE_DIRS}
   ${LIBNGHTTP3_INCLUDE_DIRS}
   ${LIBNGTCP2_INCLUDE_DIRS}
-  ${LIBNGTCP2_CRYPTO_OPENSSL_INCLUDE_DIRS}
+  ${LIBNGTCP2_CRYPTO_QUICTLS_INCLUDE_DIRS}
+  ${LIBNGTCP2_CRYPTO_WOLFSSL_INCLUDE_DIRS}
   ${OPENSSL_INCLUDE_DIRS}
+  ${WOLFSSL_INCLUDE_DIRS}
   ${LIBCARES_INCLUDE_DIRS}
   ${JANSSON_INCLUDE_DIRS}
   ${ZLIB_INCLUDE_DIRS}
   ${LIBBPF_INCLUDE_DIRS}
+  ${LIBBROTLIENC_INCLUDE_DIRS}
+  ${LIBBROTLIDEC_INCLUDE_DIRS}
 )
 
 # XXX per-target?
@@ -31,13 +35,17 @@ link_libraries(
   ${LIBEV_LIBRARIES}
   ${LIBNGHTTP3_LIBRARIES}
   ${LIBNGTCP2_LIBRARIES}
-  ${LIBNGTCP2_CRYPTO_OPENSSL_LIBRARIES}
+  ${LIBNGTCP2_CRYPTO_QUICTLS_LIBRARIES}
+  ${LIBNGTCP2_CRYPTO_WOLFSSL_LIBRARIES}
   ${OPENSSL_LIBRARIES}
+  ${WOLFSSL_LIBRARIES}
   ${LIBCARES_LIBRARIES}
   ${JANSSON_LIBRARIES}
   ${ZLIB_LIBRARIES}
   ${APP_LIBRARIES}
   ${LIBBPF_LIBRARIES}
+  ${LIBBROTLIENC_LIBRARIES}
+  ${LIBBROTLIDEC_LIBRARIES}
 )
 
 if(ENABLE_APP)
@@ -163,45 +171,45 @@ if(ENABLE_APP)
     target_link_libraries(nghttpx_static neverbleed)
   endif()
 
-
-  if(HAVE_CUNIT)
-    set(NGHTTPX_UNITTEST_SOURCES
-      shrpx-unittest.cc
-      shrpx_tls_test.cc
-      shrpx_downstream_test.cc
-      shrpx_config_test.cc
-      shrpx_worker_test.cc
-      shrpx_http_test.cc
-      shrpx_router_test.cc
-      http2_test.cc
-      util_test.cc
-      nghttp2_gzip_test.c
-      nghttp2_gzip.c
-      buffer_test.cc
-      memchunk_test.cc
-      template_test.cc
-      base64_test.cc
+  set(NGHTTPX_UNITTEST_SOURCES
+    shrpx-unittest.cc
+    shrpx_tls_test.cc
+    shrpx_downstream_test.cc
+    shrpx_config_test.cc
+    shrpx_worker_test.cc
+    shrpx_http_test.cc
+    shrpx_router_test.cc
+    http2_test.cc
+    util_test.cc
+    nghttp2_gzip_test.c
+    nghttp2_gzip.c
+    buffer_test.cc
+    memchunk_test.cc
+    template_test.cc
+    base64_test.cc
+    ${CMAKE_SOURCE_DIR}/tests/munit/munit.c
+  )
+  add_executable(nghttpx-unittest EXCLUDE_FROM_ALL
+    ${NGHTTPX_UNITTEST_SOURCES}
+    $<TARGET_OBJECTS:llhttp>
+    $<TARGET_OBJECTS:url-parser>
     )
-    add_executable(nghttpx-unittest EXCLUDE_FROM_ALL
-      ${NGHTTPX_UNITTEST_SOURCES}
-      $<TARGET_OBJECTS:llhttp>
-      $<TARGET_OBJECTS:url-parser>
-    )
-    target_include_directories(nghttpx-unittest PRIVATE ${CUNIT_INCLUDE_DIRS})
-    target_compile_definitions(nghttpx-unittest
-      PRIVATE "-DNGHTTP2_SRC_DIR=\"${CMAKE_SOURCE_DIR}/src\""
-    )
-    target_link_libraries(nghttpx-unittest nghttpx_static ${CUNIT_LIBRARIES})
-    if(HAVE_MRUBY)
-      target_link_libraries(nghttpx-unittest mruby-lib)
-    endif()
-    if(HAVE_NEVERBLEED)
-      target_link_libraries(nghttpx-unittest neverbleed)
-    endif()
-
-    add_test(nghttpx-unittest nghttpx-unittest)
-    add_dependencies(check nghttpx-unittest)
+  target_include_directories(nghttpx-unittest PRIVATE
+    ${CMAKE_SOURCE_DIR}/tests/munit
+  )
+  target_compile_definitions(nghttpx-unittest
+    PRIVATE "-DNGHTTP2_SRC_DIR=\"${CMAKE_SOURCE_DIR}/src\""
+  )
+  target_link_libraries(nghttpx-unittest nghttpx_static)
+  if(HAVE_MRUBY)
+    target_link_libraries(nghttpx-unittest mruby-lib)
   endif()
+  if(HAVE_NEVERBLEED)
+    target_link_libraries(nghttpx-unittest neverbleed)
+  endif()
+
+  add_test(nghttpx-unittest nghttpx-unittest)
+  add_dependencies(check nghttpx-unittest)
 
   add_executable(nghttp   ${NGHTTP_SOURCES}   $<TARGET_OBJECTS:llhttp>
     $<TARGET_OBJECTS:url-parser>
@@ -221,8 +229,7 @@ if(ENABLE_APP)
     $<TARGET_OBJECTS:url-parser>
   )
 
-  install(TARGETS nghttp nghttpd nghttpx h2load
-    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  install(TARGETS nghttp nghttpd nghttpx h2load)
 endif()
 
 if(ENABLE_HPACK_TOOLS)
@@ -238,6 +245,5 @@ if(ENABLE_HPACK_TOOLS)
   )
   add_executable(inflatehd ${inflatehd_SOURCES})
   add_executable(deflatehd ${deflatehd_SOURCES})
-  install(TARGETS inflatehd deflatehd
-    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")
+  install(TARGETS inflatehd deflatehd)
 endif()

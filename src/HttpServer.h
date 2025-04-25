@@ -37,10 +37,18 @@
 #include <map>
 #include <memory>
 
-#include <openssl/ssl.h>
+#include "ssl_compat.h"
+
+#ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <wolfssl/options.h>
+#  include <wolfssl/openssl/ssl.h>
+#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <openssl/ssl.h>
+#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
 
 #include <ev.h>
 
+#define NGHTTP2_NO_SSIZE_T
 #include <nghttp2/nghttp2.h>
 
 #include "http2.h"
@@ -92,23 +100,24 @@ class Http2Handler;
 
 struct FileEntry {
   FileEntry(std::string path, int64_t length, int64_t mtime, int fd,
-            const std::string *content_type, ev_tstamp last_valid,
+            const std::string *content_type,
+            const std::chrono::steady_clock::time_point &last_valid,
             bool stale = false)
-      : path(std::move(path)),
-        length(length),
-        mtime(mtime),
-        last_valid(last_valid),
-        content_type(content_type),
-        dlnext(nullptr),
-        dlprev(nullptr),
-        fd(fd),
-        usecount(1),
-        stale(stale) {}
+    : path(std::move(path)),
+      length(length),
+      mtime(mtime),
+      last_valid(last_valid),
+      content_type(content_type),
+      dlnext(nullptr),
+      dlprev(nullptr),
+      fd(fd),
+      usecount(1),
+      stale(stale) {}
   std::string path;
   std::multimap<std::string, std::unique_ptr<FileEntry>>::iterator it;
   int64_t length;
   int64_t mtime;
-  ev_tstamp last_valid;
+  std::chrono::steady_clock::time_point last_valid;
   const std::string *content_type;
   FileEntry *dlnext, *dlprev;
   int fd;
@@ -166,19 +175,19 @@ public:
   int on_read();
   int on_write();
   int connection_made();
-  int verify_npn_result();
+  int verify_alpn_result();
 
   int submit_file_response(const StringRef &status, Stream *stream,
                            time_t last_modified, off_t file_length,
                            const std::string *content_type,
-                           nghttp2_data_provider *data_prd);
+                           nghttp2_data_provider2 *data_prd);
 
   int submit_response(const StringRef &status, int32_t stream_id,
-                      nghttp2_data_provider *data_prd);
+                      nghttp2_data_provider2 *data_prd);
 
   int submit_response(const StringRef &status, int32_t stream_id,
                       const HeaderRefs &headers,
-                      nghttp2_data_provider *data_prd);
+                      nghttp2_data_provider2 *data_prd);
 
   int submit_non_final_response(const std::string &status, int32_t stream_id);
 
@@ -243,9 +252,10 @@ private:
   const Config *config_;
 };
 
-ssize_t file_read_callback(nghttp2_session *session, int32_t stream_id,
-                           uint8_t *buf, size_t length, uint32_t *data_flags,
-                           nghttp2_data_source *source, void *user_data);
+nghttp2_ssize file_read_callback(nghttp2_session *session, int32_t stream_id,
+                                 uint8_t *buf, size_t length,
+                                 uint32_t *data_flags,
+                                 nghttp2_data_source *source, void *user_data);
 
 } // namespace nghttp2
 
