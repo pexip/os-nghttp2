@@ -21,41 +21,18 @@ note that nghttp2 itself does not depend on libevent.
 
 The server starts with some libevent and OpenSSL setup in the
 ``main()`` and ``run()`` functions. This setup isn't specific to
-nghttp2, but one thing you should look at is setup of the NPN
-callback. The NPN callback is used by the server to advertise which
-application protocols the server supports to a client.  In this
-example program, when creating the ``SSL_CTX`` object, we store the
-application protocol name in the wire format of NPN in a statically
-allocated buffer. This is safe because we only create one ``SSL_CTX``
-object in the program's entire lifetime.
+nghttp2, but one thing you should look at is setup of ALPN callback.
+The ALPN callback is used by the server to select application
+protocols offered by client.  In ALPN, client sends the list of
+supported application protocols, and server selects one of them.  We
+provide the callback for it::
 
-If you are following TLS related RFC, you know that NPN is not the
-standardized way to negotiate HTTP/2.  NPN itself is not even
-published as RFC.  The standard way to negotiate HTTP/2 is ALPN,
-Application-Layer Protocol Negotiation Extension, defined in `RFC 7301
-<https://tools.ietf.org/html/rfc7301>`_.  The one caveat of ALPN is
-that OpenSSL >= 1.0.2 is required.  We use macro to enable/disable
-ALPN support depending on OpenSSL version.  In ALPN, client sends the
-list of supported application protocols, and server selects one of
-them.  We provide the callback for it::
-
-    static unsigned char next_proto_list[256];
-    static size_t next_proto_list_len;
-
-    static int next_proto_cb(SSL *s _U_, const unsigned char **data,
-                             unsigned int *len, void *arg _U_) {
-      *data = next_proto_list;
-      *len = (unsigned int)next_proto_list_len;
-      return SSL_TLSEXT_ERR_OK;
-    }
-
-    #if OPENSSL_VERSION_NUMBER >= 0x10002000L
     static int alpn_select_proto_cb(SSL *ssl _U_, const unsigned char **out,
                                     unsigned char *outlen, const unsigned char *in,
                                     unsigned int inlen, void *arg _U_) {
       int rv;
 
-      rv = nghttp2_select_next_protocol((unsigned char **)out, outlen, in, inlen);
+      rv = nghttp2_select_alpn(out, outlen, in, inlen);
 
       if (rv != 1) {
         return SSL_TLSEXT_ERR_NOACK;
@@ -63,7 +40,6 @@ them.  We provide the callback for it::
 
       return SSL_TLSEXT_ERR_OK;
     }
-    #endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
 
     static SSL_CTX *create_ssl_ctx(const char *key_file, const char *cert_file) {
       SSL_CTX *ssl_ctx;
@@ -73,33 +49,14 @@ them.  We provide the callback for it::
 
       ...
 
-      next_proto_list[0] = NGHTTP2_PROTO_VERSION_ID_LEN;
-      memcpy(&next_proto_list[1], NGHTTP2_PROTO_VERSION_ID,
-             NGHTTP2_PROTO_VERSION_ID_LEN);
-      next_proto_list_len = 1 + NGHTTP2_PROTO_VERSION_ID_LEN;
-
-      SSL_CTX_set_next_protos_advertised_cb(ssl_ctx, next_proto_cb, NULL);
-
-    #if OPENSSL_VERSION_NUMBER >= 0x10002000L
       SSL_CTX_set_alpn_select_cb(ssl_ctx, alpn_select_proto_cb, NULL);
-    #endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
 
       return ssl_ctx;
     }
 
-The wire format of NPN is a sequence of length prefixed strings, with
-exactly one byte used to specify the length of each protocol
-identifier.  In this tutorial, we advertise the specific HTTP/2
-protocol version the current nghttp2 library supports, which is
-exported in the identifier :macro:`NGHTTP2_PROTO_VERSION_ID`. The
-``next_proto_cb()`` function is the server-side NPN callback. In the
-OpenSSL implementation, we just assign the pointer to the NPN buffers
-we filled in earlier. The NPN callback function is set to the
-``SSL_CTX`` object using ``SSL_CTX_set_next_protos_advertised_cb()``.
-
-In ``alpn_select_proto_cb()``, we use `nghttp2_select_next_protocol()`
-to select application protocol.  The `nghttp2_select_next_protocol()`
-returns 1 only if it selected h2 (ALPN identifier for HTTP/2), and out
+In ``alpn_select_proto_cb()``, we use `nghttp2_select_alpn()` to
+select application protocol.  The `nghttp2_select_alpn()` returns 1
+only if it selected h2 (ALPN identifier for HTTP/2), and out
 parameters were assigned accordingly.
 
 Next, let's take a look at the main structures used by the example
@@ -213,12 +170,7 @@ underlying network socket::
 
         ssl = bufferevent_openssl_get_ssl(session_data->bev);
 
-        SSL_get0_next_proto_negotiated(ssl, &alpn, &alpnlen);
-    #if OPENSSL_VERSION_NUMBER >= 0x10002000L
-        if (alpn == NULL) {
-          SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
-        }
-    #endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
+        SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
 
         if (alpn == NULL || alpnlen != 2 || memcmp("h2", alpn, 2) != 0) {
           fprintf(stderr, "%s h2 is not negotiated\n", session_data->client_addr);
@@ -268,7 +220,7 @@ session object and several callbacks::
 
       nghttp2_session_callbacks_new(&callbacks);
 
-      nghttp2_session_callbacks_set_send_callback(callbacks, send_callback);
+      nghttp2_session_callbacks_set_send_callback2(callbacks, send_callback);
 
       nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks,
                                                            on_frame_recv_callback);
@@ -323,12 +275,12 @@ this pending data. To process the received data, we call the
 ``session_recv()`` function::
 
     static int session_recv(http2_session_data *session_data) {
-      ssize_t readlen;
+      nghttp2_ssize readlen;
       struct evbuffer *input = bufferevent_get_input(session_data->bev);
       size_t datalen = evbuffer_get_length(input);
       unsigned char *data = evbuffer_pullup(input, -1);
 
-      readlen = nghttp2_session_mem_recv(session_data->session, data, datalen);
+      readlen = nghttp2_session_mem_recv2(session_data->session, data, datalen);
       if (readlen < 0) {
         warnx("Fatal error: %s", nghttp2_strerror((int)readlen));
         return -1;
@@ -344,9 +296,9 @@ this pending data. To process the received data, we call the
     }
 
 In this function, we feed all unprocessed but already received data to
-the nghttp2 session object using the `nghttp2_session_mem_recv()`
-function. The `nghttp2_session_mem_recv()` function processes the data
-and may both invoke the previously setup callbacks and also queue
+the nghttp2 session object using the `nghttp2_session_mem_recv2()`
+function. The `nghttp2_session_mem_recv2()` function processes the
+data and may both invoke the previously setup callbacks and also queue
 outgoing frames. To send any pending outgoing frames, we immediately
 call ``session_send()``.
 
@@ -364,11 +316,12 @@ The ``session_send()`` function is defined as follows::
 
 The `nghttp2_session_send()` function serializes the frame into wire
 format and calls the ``send_callback()``, which is of type
-:type:`nghttp2_send_callback`.  The ``send_callback()`` is defined as
+:type:`nghttp2_send_callback2`.  The ``send_callback()`` is defined as
 follows::
 
-    static ssize_t send_callback(nghttp2_session *session _U_, const uint8_t *data,
-                                 size_t length, int flags _U_, void *user_data) {
+    static nghttp2_ssize send_callback(nghttp2_session *session _U_,
+                                       const uint8_t *data, size_t length,
+                                       int flags _U_, void *user_data) {
       http2_session_data *session_data = (http2_session_data *)user_data;
       struct bufferevent *bev = session_data->bev;
       /* Avoid excessive buffering in server side. */
@@ -377,7 +330,7 @@ follows::
         return NGHTTP2_ERR_WOULDBLOCK;
       }
       bufferevent_write(bev, data, length);
-      return (ssize_t)length;
+      return (nghttp2_ssize)length;
     }
 
 Since we use bufferevent to abstract network I/O, we just write the
@@ -557,11 +510,11 @@ Sending the file content is performed by the ``send_response()`` function::
     static int send_response(nghttp2_session *session, int32_t stream_id,
                              nghttp2_nv *nva, size_t nvlen, int fd) {
       int rv;
-      nghttp2_data_provider data_prd;
+      nghttp2_data_provider2 data_prd;
       data_prd.source.fd = fd;
       data_prd.read_callback = file_read_callback;
 
-      rv = nghttp2_submit_response(session, stream_id, nva, nvlen, &data_prd);
+      rv = nghttp2_submit_response2(session, stream_id, nva, nvlen, &data_prd);
       if (rv != 0) {
         warnx("Fatal error: %s", nghttp2_strerror(rv));
         return -1;
@@ -569,7 +522,7 @@ Sending the file content is performed by the ``send_response()`` function::
       return 0;
     }
 
-nghttp2 uses the :type:`nghttp2_data_provider` structure to send the
+nghttp2 uses the :type:`nghttp2_data_provider2` structure to send the
 entity body to the remote peer. The ``source`` member of this
 structure is a union, which can be either a void pointer or an int
 (which is intended to be used as file descriptor). In this example
@@ -577,11 +530,11 @@ server, we use it as a file descriptor. We also set the
 ``file_read_callback()`` callback function to read the contents of the
 file::
 
-    static ssize_t file_read_callback(nghttp2_session *session _U_,
-                                      int32_t stream_id _U_, uint8_t *buf,
-                                      size_t length, uint32_t *data_flags,
-                                      nghttp2_data_source *source,
-                                      void *user_data _U_) {
+    static nghttp2_ssize file_read_callback(nghttp2_session *session _U_,
+                                            int32_t stream_id _U_, uint8_t *buf,
+                                            size_t length, uint32_t *data_flags,
+                                            nghttp2_data_source *source,
+                                            void *user_data _U_) {
       int fd = source->fd;
       ssize_t r;
       while ((r = read(fd, buf, length)) == -1 && errno == EINTR)
@@ -592,7 +545,7 @@ file::
       if (r == 0) {
         *data_flags |= NGHTTP2_DATA_FLAG_EOF;
       }
-      return r;
+      return (nghttp2_ssize)r;
     }
 
 If an error occurs while reading the file, we return
@@ -601,8 +554,8 @@ library to send RST_STREAM to the stream.  When all data has been
 read, the :macro:`NGHTTP2_DATA_FLAG_EOF` flag is set to signal nghttp2
 that we have finished reading the file.
 
-The `nghttp2_submit_response()` function is used to send the response to the
-remote peer.
+The `nghttp2_submit_response2()` function is used to send the response
+to the remote peer.
 
 The ``on_stream_close_callback()`` function is invoked when the stream
 is about to close::

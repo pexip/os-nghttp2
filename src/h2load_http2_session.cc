@@ -37,7 +37,7 @@ using namespace nghttp2;
 namespace h2load {
 
 Http2Session::Http2Session(Client *client)
-    : client_(client), session_(nullptr) {}
+  : client_(client), session_(nullptr) {}
 
 Http2Session::~Http2Session() { nghttp2_session_del(session_); }
 
@@ -47,8 +47,7 @@ int on_header_callback(nghttp2_session *session, const nghttp2_frame *frame,
                        const uint8_t *value, size_t valuelen, uint8_t flags,
                        void *user_data) {
   auto client = static_cast<Client *>(user_data);
-  if (frame->hd.type != NGHTTP2_HEADERS ||
-      frame->headers.cat != NGHTTP2_HCAT_RESPONSE) {
+  if (frame->hd.type != NGHTTP2_HEADERS) {
     return 0;
   }
   client->on_header(frame->hd.stream_id, name, namelen, value, valuelen);
@@ -70,15 +69,17 @@ namespace {
 int on_frame_recv_callback(nghttp2_session *session, const nghttp2_frame *frame,
                            void *user_data) {
   auto client = static_cast<Client *>(user_data);
-  if (frame->hd.type != NGHTTP2_HEADERS ||
-      frame->headers.cat != NGHTTP2_HCAT_RESPONSE) {
-    return 0;
-  }
-  client->worker->stats.bytes_head +=
+  switch (frame->hd.type) {
+  case NGHTTP2_HEADERS:
+    client->worker->stats.bytes_head +=
       frame->hd.length - frame->headers.padlen -
       ((frame->hd.flags & NGHTTP2_FLAG_PRIORITY) ? 5 : 0);
-  if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
-    client->record_ttfb();
+    // fall through
+  case NGHTTP2_DATA:
+    if (frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
+      client->record_ttfb();
+    }
+    break;
   }
   return 0;
 }
@@ -123,16 +124,17 @@ int before_frame_send_callback(nghttp2_session *session,
 } // namespace
 
 namespace {
-ssize_t file_read_callback(nghttp2_session *session, int32_t stream_id,
-                           uint8_t *buf, size_t length, uint32_t *data_flags,
-                           nghttp2_data_source *source, void *user_data) {
+nghttp2_ssize file_read_callback(nghttp2_session *session, int32_t stream_id,
+                                 uint8_t *buf, size_t length,
+                                 uint32_t *data_flags,
+                                 nghttp2_data_source *source, void *user_data) {
   auto client = static_cast<Client *>(user_data);
   auto config = client->worker->config;
   auto req_stat = client->get_req_stat(stream_id);
   assert(req_stat);
   ssize_t nread;
   while ((nread = pread(config->data_fd, buf, length, req_stat->data_offset)) ==
-             -1 &&
+           -1 &&
          errno == EINTR)
     ;
 
@@ -157,8 +159,8 @@ ssize_t file_read_callback(nghttp2_session *session, int32_t stream_id,
 } // namespace
 
 namespace {
-ssize_t send_callback(nghttp2_session *session, const uint8_t *data,
-                      size_t length, int flags, void *user_data) {
+nghttp2_ssize send_callback(nghttp2_session *session, const uint8_t *data,
+                            size_t length, int flags, void *user_data) {
   auto client = static_cast<Client *>(user_data);
   auto &wb = client->wb;
 
@@ -186,18 +188,18 @@ void Http2Session::on_connect() {
                                                        on_frame_recv_callback);
 
   nghttp2_session_callbacks_set_on_data_chunk_recv_callback(
-      callbacks, on_data_chunk_recv_callback);
+    callbacks, on_data_chunk_recv_callback);
 
   nghttp2_session_callbacks_set_on_stream_close_callback(
-      callbacks, on_stream_close_callback);
+    callbacks, on_stream_close_callback);
 
   nghttp2_session_callbacks_set_on_header_callback(callbacks,
                                                    on_header_callback);
 
   nghttp2_session_callbacks_set_before_frame_send_callback(
-      callbacks, before_frame_send_callback);
+    callbacks, before_frame_send_callback);
 
-  nghttp2_session_callbacks_set_send_callback(callbacks, send_callback);
+  nghttp2_session_callbacks_set_send_callback2(callbacks, send_callback);
 
   nghttp2_option *opt;
 
@@ -208,7 +210,7 @@ void Http2Session::on_connect() {
 
   if (config->encoder_header_table_size != NGHTTP2_DEFAULT_HEADER_TABLE_SIZE) {
     nghttp2_option_set_max_deflate_dynamic_table_size(
-        opt, config->encoder_header_table_size);
+      opt, config->encoder_header_table_size);
   }
 
   nghttp2_session_client_new2(&session_, callbacks, client_, opt);
@@ -256,11 +258,11 @@ int Http2Session::submit_request() {
     client_->reqidx = 0;
   }
 
-  nghttp2_data_provider prd{{0}, file_read_callback};
+  nghttp2_data_provider2 prd{{0}, file_read_callback};
 
   auto stream_id =
-      nghttp2_submit_request(session_, nullptr, nva.data(), nva.size(),
-                             config->data_fd == -1 ? nullptr : &prd, nullptr);
+    nghttp2_submit_request2(session_, nullptr, nva.data(), nva.size(),
+                            config->data_fd == -1 ? nullptr : &prd, nullptr);
   if (stream_id < 0) {
     return -1;
   }
@@ -271,7 +273,7 @@ int Http2Session::submit_request() {
 }
 
 int Http2Session::on_read(const uint8_t *data, size_t len) {
-  auto rv = nghttp2_session_mem_recv(session_, data, len);
+  auto rv = nghttp2_session_mem_recv2(session_, data, len);
   if (rv < 0) {
     return -1;
   }
@@ -307,7 +309,7 @@ void Http2Session::terminate() {
 }
 
 size_t Http2Session::max_concurrent_streams() {
-  return (size_t)client_->worker->config->max_concurrent_streams;
+  return client_->worker->config->max_concurrent_streams;
 }
 
 } // namespace h2load

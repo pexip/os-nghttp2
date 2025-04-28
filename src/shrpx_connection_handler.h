@@ -44,7 +44,14 @@
 #  include <bpf/libbpf.h>
 #endif // HAVE_LIBBPF
 
-#include <openssl/ssl.h>
+#include "ssl_compat.h"
+
+#ifdef NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <wolfssl/options.h>
+#  include <wolfssl/openssl/ssl.h>
+#else // !NGHTTP2_OPENSSL_IS_WOLFSSL
+#  include <openssl/ssl.h>
+#endif // !NGHTTP2_OPENSSL_IS_WOLFSSL
 
 #include <ev.h>
 
@@ -97,7 +104,7 @@ struct SerialEvent {
   // ctor for event uses DownstreamConfig
   SerialEvent(SerialEventType type,
               const std::shared_ptr<DownstreamConfig> &downstreamconf)
-      : type(type), downstreamconf(downstreamconf) {}
+    : type(type), downstreamconf(downstreamconf) {}
 
   SerialEventType type;
   std::shared_ptr<DownstreamConfig> downstreamconf;
@@ -107,8 +114,8 @@ struct SerialEvent {
 #  ifdef HAVE_LIBBPF
 struct BPFRef {
   bpf_object *obj;
-  int reuseport_array;
-  int cid_prefix_map;
+  bpf_map *reuseport_array;
+  bpf_map *worker_id_map;
 };
 #  endif // HAVE_LIBBPF
 
@@ -121,12 +128,10 @@ enum class QUICIPCType {
 
 // WorkerProcesses which are in graceful shutdown period.
 struct QUICLingeringWorkerProcess {
-  QUICLingeringWorkerProcess(
-      std::vector<std::array<uint8_t, SHRPX_QUIC_CID_PREFIXLEN>> cid_prefixes,
-      int quic_ipc_fd)
-      : cid_prefixes{std::move(cid_prefixes)}, quic_ipc_fd{quic_ipc_fd} {}
+  QUICLingeringWorkerProcess(std::vector<WorkerID> worker_ids, int quic_ipc_fd)
+    : worker_ids{std::move(worker_ids)}, quic_ipc_fd{quic_ipc_fd} {}
 
-  std::vector<std::array<uint8_t, SHRPX_QUIC_CID_PREFIXLEN>> cid_prefixes;
+  std::vector<WorkerID> worker_ids;
   // Socket to send QUIC IPC message to this worker process.
   int quic_ipc_fd;
 };
@@ -177,7 +182,7 @@ public:
   void proceed_next_cert_ocsp();
 
   void set_tls_ticket_key_memcached_dispatcher(
-      std::unique_ptr<MemcachedDispatcher> dispatcher);
+    std::unique_ptr<MemcachedDispatcher> dispatcher);
 
   MemcachedDispatcher *get_tls_ticket_key_memcached_dispatcher() const;
   void on_tls_ticket_key_network_error(ev_timer *w);
@@ -197,30 +202,27 @@ public:
 
   int forward_quic_packet(const UpstreamAddr *faddr, const Address &remote_addr,
                           const Address &local_addr, const ngtcp2_pkt_info &pi,
-                          const uint8_t *cid_prefix, const uint8_t *data,
-                          size_t datalen);
+                          const WorkerID &wid, std::span<const uint8_t> data);
 
   void set_quic_keying_materials(std::shared_ptr<QUICKeyingMaterials> qkms);
   const std::shared_ptr<QUICKeyingMaterials> &get_quic_keying_materials() const;
 
-  void set_cid_prefixes(
-      const std::vector<std::array<uint8_t, SHRPX_QUIC_CID_PREFIXLEN>>
-          &cid_prefixes);
+  void set_worker_ids(std::vector<WorkerID> worker_ids);
+  Worker *find_worker(const WorkerID &wid) const;
 
   void set_quic_lingering_worker_processes(
-      const std::vector<QUICLingeringWorkerProcess> &quic_lwps);
+    const std::vector<QUICLingeringWorkerProcess> &quic_lwps);
 
-  // Return matching QUICLingeringWorkerProcess which has a CID prefix
+  // Return matching QUICLingeringWorkerProcess which has a Worker ID
   // such that |dcid| starts with it.  If no such
   // QUICLingeringWorkerProcess, it returns nullptr.
   QUICLingeringWorkerProcess *
-  match_quic_lingering_worker_process_cid_prefix(const uint8_t *dcid,
-                                                 size_t dcidlen);
+  match_quic_lingering_worker_process_worker_id(const WorkerID &wid);
 
   int forward_quic_packet_to_lingering_worker_process(
-      QUICLingeringWorkerProcess *quic_lwp, const Address &remote_addr,
-      const Address &local_addr, const ngtcp2_pkt_info &pi, const uint8_t *data,
-      size_t datalen);
+    QUICLingeringWorkerProcess *quic_lwp, const Address &remote_addr,
+    const Address &local_addr, const ngtcp2_pkt_info &pi,
+    std::span<const uint8_t> data);
 
   void set_quic_ipc_fd(int fd);
 
@@ -239,7 +241,7 @@ public:
   // Send SerialEvent SerialEventType::REPLACE_DOWNSTREAM to this
   // object.
   void send_replace_downstream(
-      const std::shared_ptr<DownstreamConfig> &downstreamconf);
+    const std::shared_ptr<DownstreamConfig> &downstreamconf);
   // Internal function to send |ev| to this object.
   void send_serial_event(SerialEvent ev);
   // Handles SerialEvents received.
@@ -260,9 +262,8 @@ private:
   // and signature algorithm presented by client.
   std::vector<std::vector<SSL_CTX *>> indexed_ssl_ctx_;
 #ifdef ENABLE_HTTP3
-  std::vector<std::array<uint8_t, SHRPX_QUIC_CID_PREFIXLEN>> cid_prefixes_;
-  std::vector<std::array<uint8_t, SHRPX_QUIC_CID_PREFIXLEN>>
-      lingering_cid_prefixes_;
+  std::vector<WorkerID> worker_ids_;
+  std::vector<WorkerID> lingering_worker_ids_;
   int quic_ipc_fd_;
   std::vector<QUICLingeringWorkerProcess> quic_lingering_worker_processes_;
 #  ifdef HAVE_LIBBPF

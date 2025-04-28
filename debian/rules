@@ -55,10 +55,8 @@ custom_install_init_scripts:
 
 # Currently we install our own systemd unit because
 # the original one is slightly broken
-SYSTEMD="debian/nghttp2-proxy/lib/systemd/system"
 custom_install_systemd:
-	install -d $(SYSTEMD)
-	install -p -m644 debian/nghttpx.service $(SYSTEMD)/nghttpx.service
+	dh_installsystemd -pnghttp2-proxy --name nghttpx
 
 %:
 	dh $@

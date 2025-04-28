@@ -64,7 +64,7 @@ enum class DNSResolverStatus {
 // result.  In other words, callback is called if get_status() returns
 // DNSResolverStatus::RUNNING.
 using CompleteCb =
-    std::function<void(DNSResolverStatus status, const Address *result)>;
+  std::function<void(DNSResolverStatus status, const Address *result)>;
 
 // DNSResolver is asynchronous name resolver, backed by c-ares
 // library.
@@ -88,7 +88,7 @@ public:
   int on_write(int fd);
   int on_timeout();
   // Calls this function when DNS query finished.
-  void on_result(int status, hostent *hostent);
+  void on_result(int status, ares_addrinfo *result);
   void reset_timeout();
 
   void start_rev(int fd);

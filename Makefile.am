@@ -35,7 +35,6 @@ EXTRA_DIST = nghttpx.conf.sample proxy.pac.sample android-config android-env \
 	cmake/ExtractValidFlags.cmake \
 	cmake/FindJemalloc.cmake \
 	cmake/FindLibev.cmake \
-	cmake/FindCUnit.cmake \
 	cmake/Version.cmake \
 	cmake/FindLibevent.cmake \
 	cmake/FindJansson.cmake \
@@ -44,7 +43,13 @@ EXTRA_DIST = nghttpx.conf.sample proxy.pac.sample android-config android-env \
 	cmake/FindLibbpf.cmake \
 	cmake/FindLibnghttp3.cmake \
 	cmake/FindLibngtcp2.cmake \
-	cmake/FindLibngtcp2_crypto_openssl.cmake
+	cmake/FindLibngtcp2_crypto_quictls.cmake \
+	cmake/FindLibbrotlienc.cmake \
+	cmake/FindLibbrotlidec.cmake \
+	cmake/FindLibngtcp2_crypto_wolfssl.cmake \
+	cmake/FindWolfSSL.cmake \
+	cmake/PickyWarningsC.cmake \
+	cmake/PickyWarningsCXX.cmake
 
 .PHONY: clang-format
 
@@ -55,5 +60,5 @@ clang-format:
 	CLANGFORMAT=`git config --get clangformat.binary`; \
 	test -z $${CLANGFORMAT} && CLANGFORMAT="clang-format"; \
 	$${CLANGFORMAT} -i lib/*.{c,h} lib/includes/nghttp2/*.h \
-	src/*.{c,cc,h} examples/*.{c,cc} \
+	src/*.{c,cc,h} examples/*.c \
 	tests/*.{c,h} bpf/*.c fuzz/*.cc

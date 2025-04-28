@@ -41,6 +41,7 @@
 
 #include <jansson.h>
 
+#define NGHTTP2_NO_SSIZE_T
 #include <nghttp2/nghttp2.h>
 
 #include "template.h"
@@ -78,7 +79,7 @@ static void to_json(nghttp2_hd_inflater *inflater, json_t *headers,
   json_object_set(obj, "wire", wire);
   json_object_set(obj, "headers", headers);
   auto max_dyn_table_size =
-      nghttp2_hd_inflate_get_max_dynamic_table_size(inflater);
+    nghttp2_hd_inflate_get_max_dynamic_table_size(inflater);
   if (old_settings_table_size != max_dyn_table_size) {
     json_object_set_new(obj, "header_table_size",
                         json_integer(max_dyn_table_size));
@@ -93,11 +94,10 @@ static void to_json(nghttp2_hd_inflater *inflater, json_t *headers,
 }
 
 static int inflate_hd(json_t *obj, nghttp2_hd_inflater *inflater, int seq) {
-  ssize_t rv;
   nghttp2_nv nv;
   int inflate_flags;
   size_t old_settings_table_size =
-      nghttp2_hd_inflate_get_max_dynamic_table_size(inflater);
+    nghttp2_hd_inflate_get_max_dynamic_table_size(inflater);
 
   auto wire = json_object_get(obj, "wire");
 
@@ -120,8 +120,8 @@ static int inflate_hd(json_t *obj, nghttp2_hd_inflater *inflater, int seq) {
               seq);
       return -1;
     }
-    rv = nghttp2_hd_inflate_change_table_size(inflater,
-                                              json_integer_value(table_size));
+    auto rv = nghttp2_hd_inflate_change_table_size(
+      inflater, json_integer_value(table_size));
     if (rv != 0) {
       fprintf(stderr,
               "nghttp2_hd_change_table_size() failed with error %s at %d\n",
@@ -147,7 +147,8 @@ static int inflate_hd(json_t *obj, nghttp2_hd_inflater *inflater, int seq) {
   auto p = buf.data();
   for (;;) {
     inflate_flags = 0;
-    rv = nghttp2_hd_inflate_hd(inflater, &nv, &inflate_flags, p, buflen, 1);
+    auto rv =
+      nghttp2_hd_inflate_hd3(inflater, &nv, &inflate_flags, p, buflen, 1);
     if (rv < 0) {
       fprintf(stderr, "inflate failed with error code %zd at %d\n", rv, seq);
       exit(EXIT_FAILURE);
@@ -156,7 +157,7 @@ static int inflate_hd(json_t *obj, nghttp2_hd_inflater *inflater, int seq) {
     buflen -= rv;
     if (inflate_flags & NGHTTP2_HD_INFLATE_EMIT) {
       json_array_append_new(
-          headers, dump_header(nv.name, nv.namelen, nv.value, nv.valuelen));
+        headers, dump_header(nv.name, nv.namelen, nv.value, nv.valuelen));
     }
     if (inflate_flags & NGHTTP2_HD_INFLATE_FINAL) {
       break;
@@ -254,7 +255,7 @@ OPTIONS:
 }
 
 constexpr static struct option long_options[] = {
-    {"dump-header-table", no_argument, nullptr, 'd'}, {nullptr, 0, nullptr, 0}};
+  {"dump-header-table", no_argument, nullptr, 'd'}, {nullptr, 0, nullptr, 0}};
 
 int main(int argc, char **argv) {
   config.dump_header_table = 0;

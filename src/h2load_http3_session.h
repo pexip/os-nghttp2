@@ -46,6 +46,7 @@ public:
 
   int init_conn();
   int stream_close(int64_t stream_id, uint64_t app_error_code);
+  int end_stream(int64_t stream_id);
   void recv_data(int64_t stream_id, const uint8_t *data, size_t datalen);
   void consume(int64_t stream_id, size_t nconsumed);
   void begin_headers(int64_t stream_id);
@@ -64,6 +65,7 @@ public:
   ssize_t write_stream(int64_t &stream_id, int &fin, nghttp3_vec *vec,
                        size_t veccnt);
   void block_stream(int64_t stream_id);
+  int unblock_stream(int64_t stream_id);
   void shutdown_stream_write(int64_t stream_id);
   int add_write_offset(int64_t stream_id, size_t ndatalen);
   int add_ack_offset(int64_t stream_id, size_t datalen);

@@ -18,34 +18,8 @@ note that nghttp2 itself does not depend on libevent.
 
 The client starts with some libevent and OpenSSL setup in the
 ``main()`` and ``run()`` functions. This setup isn't specific to
-nghttp2, but one thing you should look at is setup of the NPN
-callback.  The NPN callback is used by the client to select the next
-application protocol over TLS. In this tutorial, we use the
-`nghttp2_select_next_protocol()` helper function to select the HTTP/2
-protocol the library supports::
-
-    static int select_next_proto_cb(SSL *ssl _U_, unsigned char **out,
-                                    unsigned char *outlen, const unsigned char *in,
-                                    unsigned int inlen, void *arg _U_) {
-      if (nghttp2_select_next_protocol(out, outlen, in, inlen) <= 0) {
-        errx(1, "Server did not advertise " NGHTTP2_PROTO_VERSION_ID);
-      }
-      return SSL_TLSEXT_ERR_OK;
-    }
-
-If you are following TLS related RFC, you know that NPN is not the
-standardized way to negotiate HTTP/2.  NPN itself is not event
-published as RFC.  The standard way to negotiate HTTP/2 is ALPN,
-Application-Layer Protocol Negotiation Extension, defined in `RFC 7301
-<https://tools.ietf.org/html/rfc7301>`_.  The one caveat of ALPN is
-that OpenSSL >= 1.0.2 is required.  We use macro to enable/disable
-ALPN support depending on OpenSSL version.  OpenSSL's ALPN
-implementation does not require callback function like the above.  But
-we have to instruct OpenSSL SSL_CTX to use ALPN, which we'll talk
-about soon.
-
-The callback is added to the SSL_CTX object using
-``SSL_CTX_set_next_proto_select_cb()``::
+nghttp2, but one thing you should look at is setup of ALPN.  Client
+tells application protocols that it supports to server via ALPN::
 
     static SSL_CTX *create_ssl_ctx(void) {
       SSL_CTX *ssl_ctx;
@@ -58,11 +32,8 @@ The callback is added to the SSL_CTX object using
                           SSL_OP_ALL | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 |
                               SSL_OP_NO_COMPRESSION |
                               SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
-      SSL_CTX_set_next_proto_select_cb(ssl_ctx, select_next_proto_cb, NULL);
 
-    #if OPENSSL_VERSION_NUMBER >= 0x10002000L
       SSL_CTX_set_alpn_protos(ssl_ctx, (const unsigned char *)"\x02h2", 3);
-    #endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
 
       return ssl_ctx;
     }
@@ -155,12 +126,7 @@ underlying network socket::
 
         ssl = bufferevent_openssl_get_ssl(session_data->bev);
 
-        SSL_get0_next_proto_negotiated(ssl, &alpn, &alpnlen);
-    #if OPENSSL_VERSION_NUMBER >= 0x10002000L
-        if (alpn == NULL) {
-          SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
-        }
-    #endif // OPENSSL_VERSION_NUMBER >= 0x10002000L
+        SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
 
         if (alpn == NULL || alpnlen != 2 || memcmp("h2", alpn, 2) != 0) {
           fprintf(stderr, "h2 is not negotiated\n");
@@ -205,7 +171,7 @@ session object and several callbacks::
 
       nghttp2_session_callbacks_new(&callbacks);
 
-      nghttp2_session_callbacks_set_send_callback(callbacks, send_callback);
+      nghttp2_session_callbacks_set_send_callback2(callbacks, send_callback);
 
       nghttp2_session_callbacks_set_on_frame_recv_callback(callbacks,
                                                            on_frame_recv_callback);
@@ -280,8 +246,8 @@ HTTP request in the ``submit_request()`` function::
           MAKE_NV(":path", stream_data->path, stream_data->pathlen)};
       fprintf(stderr, "Request headers:\n");
       print_headers(stderr, hdrs, ARRLEN(hdrs));
-      stream_id = nghttp2_submit_request(session_data->session, NULL, hdrs,
-                                         ARRLEN(hdrs), NULL, stream_data);
+      stream_id = nghttp2_submit_request2(session_data->session, NULL, hdrs,
+                                          ARRLEN(hdrs), NULL, stream_data);
       if (stream_id < 0) {
         errx(1, "Could not submit HTTP request: %s", nghttp2_strerror(stream_id));
       }
@@ -292,11 +258,11 @@ HTTP request in the ``submit_request()`` function::
 We build the HTTP request header fields in ``hdrs``, which is an array
 of :type:`nghttp2_nv`. There are four header fields to be sent:
 ``:method``, ``:scheme``, ``:authority``, and ``:path``. To queue the
-HTTP request, we call `nghttp2_submit_request()`. The ``stream_data``
+HTTP request, we call `nghttp2_submit_request2()`. The ``stream_data``
 is passed via the *stream_user_data* parameter, which is helpfully
 later passed back to callback functions.
 
-`nghttp2_submit_request()` returns the newly assigned stream ID for
+`nghttp2_submit_request2()` returns the newly assigned stream ID for
 the request.
 
 The next bufferevent callback is ``readcb()``, which is invoked when
@@ -304,12 +270,12 @@ data is available to read from the bufferevent input buffer::
 
     static void readcb(struct bufferevent *bev, void *ptr) {
       http2_session_data *session_data = (http2_session_data *)ptr;
-      ssize_t readlen;
+      nghttp2_ssize readlen;
       struct evbuffer *input = bufferevent_get_input(bev);
       size_t datalen = evbuffer_get_length(input);
       unsigned char *data = evbuffer_pullup(input, -1);
 
-      readlen = nghttp2_session_mem_recv(session_data->session, data, datalen);
+      readlen = nghttp2_session_mem_recv2(session_data->session, data, datalen);
       if (readlen < 0) {
         warnx("Fatal error: %s", nghttp2_strerror((int)readlen));
         delete_http2_session_data(session_data);
@@ -327,8 +293,8 @@ data is available to read from the bufferevent input buffer::
     }
 
 In this function we feed all unprocessed, received data to the nghttp2
-session object using the `nghttp2_session_mem_recv()` function.
-`nghttp2_session_mem_recv()` processes the received data and may
+session object using the `nghttp2_session_mem_recv2()` function.
+`nghttp2_session_mem_recv2()` processes the received data and may
 invoke nghttp2 callbacks and queue frames for transmission.  Since
 there may be pending frames for transmission, we call immediately
 ``session_send()`` to send them.  ``session_send()`` is defined as
@@ -347,15 +313,16 @@ follows::
 
 The `nghttp2_session_send()` function serializes pending frames into
 wire format and calls the ``send_callback()`` function to send them.
-``send_callback()`` has type :type:`nghttp2_send_callback` and is
+``send_callback()`` has type :type:`nghttp2_send_callback2` and is
 defined as::
 
-    static ssize_t send_callback(nghttp2_session *session _U_, const uint8_t *data,
-                                 size_t length, int flags _U_, void *user_data) {
+    static nghttp2_ssize send_callback(nghttp2_session *session _U_,
+                                       const uint8_t *data, size_t length,
+                                       int flags _U_, void *user_data) {
       http2_session_data *session_data = (http2_session_data *)user_data;
       struct bufferevent *bev = session_data->bev;
       bufferevent_write(bev, data, length);
-      return (ssize_t)length;
+      return (nghttp2_ssize)length;
     }
 
 Since we use bufferevent to abstract network I/O, we just write the
