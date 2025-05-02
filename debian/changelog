@@ -1,3 +1,9 @@
+nghttp2 (1.64.0-1+pexip25u1) pexip-trixie; urgency=medium
+
+  * New upstream release.
+
+ -- Mark Hymers <mark.hymers@pexip.com>  Fri, 02 May 2025 09:42:02 +0000
+
 nghttp2 (1.64.0-1.1) unstable; urgency=medium
 
   * Add patch: lp-2104171-avoid-rubydomain-namespace.patch (Closes: #1095360)
