@@ -1,0 +1,28 @@
+Description: Fix FTBFS due to rubydomain namespace
+ Fixes FTBFS due to: "Could not import extension rubydomain.rubydomain"
+ (exception: No module named 'pkg_resources')
+
+Author: Lukas Märdian <slyon@ubuntu.com>
+Bug-Ubuntu: https://launchpad.net/bugs/2104171
+Bug-Debian: https://bugs.debian.org/cgi-bin/bugreport.cgi?bug=1095360
+Origin: vendor, Ubuntu
+Forwarded: https://github.com/nghttp2/nghttp2/pull/2318
+Last-Update: 2025-03-27
+
+--- nghttp2-1.64.0.orig/doc/_exts/rubydomain/__init__.py
++++ nghttp2-1.64.0/doc/_exts/rubydomain/__init__.py
+@@ -1,14 +0,0 @@
+-# -*- coding: utf-8 -*-
+-"""
+-    sphinxcontrib
+-    ~~~~~~~~~~~~~
+-
+-    This package is a namespace package that contains all extensions
+-    distributed in the ``sphinx-contrib`` distribution.
+-
+-    :copyright: Copyright 2007-2009 by the Sphinx team, see AUTHORS.
+-    :license: BSD, see LICENSE for details.
+-"""
+-
+-__import__('pkg_resources').declare_namespace(__name__)
+-
