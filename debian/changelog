@@ -1,3 +1,12 @@
+nghttp2 (1.64.0-1.1+deb13u1) trixie-security; urgency=medium
+
+  * Non-maintainer upload by the Security Team.
+  * CVE-2026-27135 (Closes: #1131369)
+    Fix missing iframe->state validations to avoid assertion failure.
+  * Add test for CVE-2026-27135 (cherry-picked from upstream c619c7b)
+
+ -- Lukas Märdian <slyon@debian.org>  Wed, 15 Apr 2026 17:04:15 +0200
+
 nghttp2 (1.64.0-1.1) unstable; urgency=medium
 
   * Add patch: lp-2104171-avoid-rubydomain-namespace.patch (Closes: #1095360)
