@@ -3,3 +3,4 @@
 lp-2104171-avoid-rubydomain-namespace.patch
 CVE-2026-27135.patch
 CVE-2026-27135-test.patch
+CVE-2026-58055.patch
